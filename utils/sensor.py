@@ -30,7 +30,7 @@ def collision_check(x0, y0, x1, y1, ground_truth, robot_belief):
         if x == x1 and y == y1:
             break
 
-        robot_belief.itemset((y, x), k)
+        robot_belief[y, x] = k
 
         if error > 0:
             x += x_inc

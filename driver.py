@@ -26,7 +26,6 @@ import ray
 import os
 import numpy as np
 import random
-import wandb
 
 from utils.model import PolicyNet, QNet
 from utils.runner import RLRunner
@@ -73,6 +72,7 @@ def main():
     target_q_update_counter = 1
 
     if USE_WANDB:
+        import wandb
         import parameter
         vars(parameter).__delitem__('__builtins__')
         wandb.init(project='Directional', name=FOLDER_NAME, config=vars(parameter), resume='allow',
