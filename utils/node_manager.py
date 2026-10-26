@@ -416,15 +416,8 @@ class Node:
     def set_visited(self, heading):
         self.visited = 1
         index = int(heading / 360 * self.num_angles_bin) % self.num_angles_bin
-        fov_size = int((self.fov / 360)*self.num_angles_bin)
-        start_index = int(index - fov_size/2)
-        end_index = int(index + fov_size/2)
-        if start_index < 0:
-            self.heading_visited[0:end_index] = 1
-            self.heading_visited[abs(start_index):] = 1
-        elif end_index >= self.num_angles_bin:
-            self.heading_visited[start_index:] = 1
-            self.heading_visited[:abs(end_index)] = 1
-        else:
-            self.heading_visited[start_index:end_index] = 1
+        half_fov_size = int((self.fov / 360) * self.num_angles_bin / 2)
+        # Use the same inclusive circular window as heading candidates.
+        indices = (index + np.arange(-half_fov_size, half_fov_size + 1)) % self.num_angles_bin
+        self.heading_visited[indices] = 1
         self.need_update_neighbor = False

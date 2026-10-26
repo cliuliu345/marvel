@@ -264,57 +264,53 @@ class Agent:
     def compute_best_heading(self, node_coords, frontier_distribution, neighbor_nodes):
         neighbor_best_headings = []
         neighbor_best_indices = []
+        half_fov_size = int((self.fov / 360) * self.num_angles_bin / 2)
+        fov_offsets = np.arange(-half_fov_size, half_fov_size + 1)
         neighbor_nodes = list(neighbor_nodes[0])
-        for i, neighbor in enumerate(neighbor_nodes):
+        for neighbor_index, neighbor in enumerate(neighbor_nodes):
             node_index = neighbor.item()
             heading_candidates = torch.zeros(self.num_heading_candidates, self.num_angles_bin)
-            if (node_index != 0) or (i == 0 and node_index == 0):
+            if (node_index != 0) or (neighbor_index == 0 and node_index == 0):
                 coords = node_coords[node_index]
                 node_data = self.node_manager.nodes_dict.find((coords[0], coords[1])).data
                 if node_data.utility > 0:
                     node_frontier_distribution = frontier_distribution[node_index]
-                    half_fov_size = int((self.fov / 360)*self.num_angles_bin/2)
                     window = np.concatenate((node_frontier_distribution[-half_fov_size:], node_frontier_distribution, node_frontier_distribution[:half_fov_size]))
                     indices = np.arange(len(node_frontier_distribution)) + half_fov_size
-                    sum_vector = np.sum(np.take(window, indices.reshape(-1, 1) + np.arange(-half_fov_size, half_fov_size + 1)), axis=1)
+                    sum_vector = np.sum(np.take(window, indices.reshape(-1, 1) + fov_offsets), axis=1)
                     top_n_indices = np.argsort(-sum_vector)[:self.num_heading_candidates]
-                    for i in range(-half_fov_size, half_fov_size+1):
-                        indices = (top_n_indices + i) % self.num_angles_bin
-                        heading_candidates += F.one_hot(torch.tensor(indices), num_classes=self.num_angles_bin).float()
                 else:
-                    top_n_indices = np.zeros(3)
-                    # Face the robot towards the A* path within 1 bin variance
+                    top_n_indices = np.zeros(self.num_heading_candidates, dtype=int)
+                    # Face the robot towards the A* path within 1 bin variance.
                     if len(self.path_coords) > 1:
                         next_coords = self.path_coords[1]
                         angle = np.degrees(np.arctan2(next_coords[1] - coords[1],
-                                                next_coords[0] - coords[0]) % (2 * np.pi))
+                                                      next_coords[0] - coords[0]) % (2 * np.pi))
                         new_index = int(angle / 360 * self.num_angles_bin) % self.num_angles_bin
-                        new_indices = [(new_index + i - self.num_heading_candidates // 2) % self.num_angles_bin for i in range(self.num_heading_candidates)]
-                        for l in range(self.num_heading_candidates):
-                            heading_candidates[l][int(new_indices[l] - self.fov/2):int(new_indices[l] + self.fov/2)] = 1
-                            top_n_indices[l] = new_indices[l]
+                        top_n_indices[:] = [(new_index + i - self.num_heading_candidates // 2) % self.num_angles_bin
+                                            for i in range(self.num_heading_candidates)]
                     else:
-                        for l in range(self.num_heading_candidates):
-                            # Make the robot face the direction of neighbor nodes
-                            neighbor_list = node_data.neighbor_list[1:]     # First node is self
-                            for l in range(self.num_heading_candidates):
-                                previous_index = 0
-                                if l < len(neighbor_list):
-                                    neighbor_coords = neighbor_list[l]                                     # First node is self
-                                    angle = np.degrees(np.arctan2(neighbor_coords[1] - coords[1], 
-                                                            neighbor_coords[0] - coords[0]) % (2 * np.pi))
-                                    new_index = int(angle / 360 * self.num_angles_bin) % self.num_angles_bin
-                                    heading_candidates[l][int(new_index-self.fov/2):int(new_index+self.fov/2)] = 1
-                                    previous_index = new_index
-                                    top_n_indices[l] = new_index
-                                else:
-                                    heading_candidates[l][previous_index+1] = 1
-                                    top_n_indices[l] = previous_index+1
+                        # Keep the existing neighbor directions and missing-neighbor center.
+                        neighbor_list = node_data.neighbor_list[1:]
+                        for candidate_index in range(self.num_heading_candidates):
+                            if candidate_index < len(neighbor_list):
+                                neighbor_coords = neighbor_list[candidate_index]
+                                angle = np.degrees(np.arctan2(neighbor_coords[1] - coords[1],
+                                                              neighbor_coords[0] - coords[0]) % (2 * np.pi))
+                                new_index = int(angle / 360 * self.num_angles_bin) % self.num_angles_bin
+                            else:
+                                new_index = 1
+                            top_n_indices[candidate_index] = new_index
+
+                # Encode every candidate with the same circular, bin-based FoV.
+                for candidate_index, center in enumerate(top_n_indices):
+                    indices = (int(center) + fov_offsets) % self.num_angles_bin
+                    heading_candidates[candidate_index, indices] = 1
                 neighbor_best_headings.append(heading_candidates)
                 neighbor_best_indices.append(top_n_indices)
             else:
                 neighbor_best_headings.append(heading_candidates)
-                neighbor_best_indices.append(np.zeros((1,3)))
+                neighbor_best_indices.append(np.zeros((1, self.num_heading_candidates), dtype=int))
         neighbor_best_headings = torch.stack(neighbor_best_headings).unsqueeze(0).to(self.device)
         return neighbor_best_headings, neighbor_best_indices
     
