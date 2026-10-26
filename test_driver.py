@@ -44,7 +44,7 @@ def run_test():
     weights = global_network.state_dict()
 
     all_fov = [120]
-    all_n_agent = [6]
+    all_n_agent = [4]
     all_sensor_range = [10]
     all_utility_range = [range_val * 0.9 for range_val in all_sensor_range]
 

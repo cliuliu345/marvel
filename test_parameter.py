@@ -16,8 +16,8 @@ LOAD_FOLDER_NAME = 'MARVEL'
 load_path = f'load_model/{LOAD_FOLDER_NAME}'
 gifs_path = f'results/gifs/{LOAD_FOLDER_NAME}'
 LOAD_MODEL = True  
-SAVE_IMG_GAP = 50
-SAVE_GIFS = True
+SAVE_IMG_GAP = 1
+SAVE_GIFS = False
 GREEDY = True
 NUM_RUN = 1
 NUM_TEST = 100
@@ -50,7 +50,7 @@ MIN_UTILITY = 1
 UPDATING_MAP_SIZE = 15 * NODE_RESOLUTION
 
 # Testing parameters
-NUM_META_AGENT = 10
+NUM_META_AGENT = 4
 INITIAL_EXPLORED_RATE = 0.90
 
 # Network parameters

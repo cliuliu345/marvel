@@ -18,7 +18,7 @@ Key configurations include:
 - GPU and logging options
 """
 
-FOLDER_NAME = 'marvel'
+FOLDER_NAME = 'scratch_20261022_224221'
 LOAD_FOLDER_NAME = 'marvel'
 model_path = f'model/{FOLDER_NAME}'
 load_path = f'load_model/{LOAD_FOLDER_NAME}'
@@ -26,9 +26,9 @@ train_path = f'train/{FOLDER_NAME}'
 gifs_path = f'gifs/{FOLDER_NAME}'
 
 # save training data
-SUMMARY_WINDOW = 32
-LOAD_MODEL = True  # Set to true to use trained model in load_model folder
-SAVE_IMG_GAP = 1000
+SUMMARY_WINDOW = 8
+LOAD_MODEL = False
+SAVE_IMG_GAP = 64
 NUM_EPISODE_BUFFER = 40
 
 # Sim parameters
@@ -71,7 +71,7 @@ MINIMUM_BUFFER_SIZE = 2000
 BATCH_SIZE = 256
 LR = 1e-5
 GAMMA = 1
-NUM_META_AGENT = 18
+NUM_META_AGENT = 4
 
 # network parameters
 NODE_INPUT_DIM = 6

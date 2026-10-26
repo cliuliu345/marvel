@@ -1,0 +1,9 @@
+# Generated run artifacts; existing tracked official assets remain tracked.
+__pycache__/
+*.py[cod]
+*.nbc
+*.nbi
+/model/
+/train/
+/gifs/
+/results/
