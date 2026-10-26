@@ -20,6 +20,16 @@ conda env create -f marvel.yml
 conda activate marvel
 ```
 
+## CPU acceleration dependencies
+
+After creating the Conda environment, install the pinned CPU acceleration packages:
+
+```bash
+python -m pip install -r requirements-speedups.txt
+```
+
+The first ray-kernel call compiles CPU code; later processes can reuse the on-disk cache. Graph guide paths still use the original A* implementation.
+
 ## Evaluation
 
 First, set the appropriate parameters in `test_parameter.py` and adjust testing configurations within `test_driver.py`. Run `test_driver.py` to evaluate.

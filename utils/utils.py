@@ -2,6 +2,7 @@ import numpy as np
 import imageio
 import os
 from skimage.morphology import label
+from utils.ray_casting import check_collision_cells
 
 from parameter import *
 
@@ -163,42 +164,9 @@ def is_frontier(location, map_info):
             return False
 
 def check_collision(start, end, map_info):
-    # Bresenham line algorithm checking
-    collision = False
-
     start_cell = get_cell_position_from_coords(start, map_info)
     end_cell = get_cell_position_from_coords(end, map_info)
-    map = map_info.map
-
-    x0 = start_cell[0]
-    y0 = start_cell[1]
-    x1 = end_cell[0]
-    y1 = end_cell[1]
-    dx, dy = abs(x1 - x0), abs(y1 - y0)
-    x, y = x0, y0
-    error = dx - dy
-    x_inc = 1 if x1 > x0 else -1
-    y_inc = 1 if y1 > y0 else -1
-    dx *= 2
-    dy *= 2
-
-    while 0 <= x < map.shape[1] and 0 <= y < map.shape[0]:
-        k = map.item(int(y), int(x))
-        if x == x1 and y == y1:
-            break
-        if k == OCCUPIED:
-            collision = True
-            break
-        if k == UNKNOWN:
-            collision = True
-            break
-        if error > 0:
-            x += x_inc
-            error -= dy
-        else:
-            y += y_inc
-            error += dx
-    return collision
+    return check_collision_cells(start_cell, end_cell, map_info.map, OCCUPIED, UNKNOWN)
 
 
 def make_gif(path, n, frame_files, rate):

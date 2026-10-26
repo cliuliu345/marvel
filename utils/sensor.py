@@ -1,45 +1,7 @@
 import numpy as np
+from utils.ray_casting import collision_check, sensor_sweep
 
 
-def collision_check(x0, y0, x1, y1, ground_truth, robot_belief):
-    x0 = x0.round()
-    y0 = y0.round()
-    x1 = x1.round()
-    y1 = y1.round()
-    dx, dy = abs(x1 - x0), abs(y1 - y0)
-    x, y = x0, y0
-    error = dx - dy
-    x_inc = 1 if x1 > x0 else -1
-    y_inc = 1 if y1 > y0 else -1
-    dx *= 2
-    dy *= 2
-
-    collision_flag = 0
-    max_collision = 2
-
-    while 0 <= x < ground_truth.shape[1] and 0 <= y < ground_truth.shape[0]:
-        k = ground_truth.item(y, x)
-        if k == 1 and collision_flag < max_collision:
-            collision_flag += 1
-            if collision_flag >= max_collision:
-                break
-
-        if k != 1 and collision_flag > 0:
-            break
-
-        if x == x1 and y == y1:
-            break
-
-        robot_belief[y, x] = k
-
-        if error > 0:
-            x += x_inc
-            error -= dy
-        else:
-            y += y_inc
-            error += dx
-
-    return robot_belief
 
 
 def sensor_work(robot_position, sensor_range, robot_belief, ground_truth):
@@ -118,6 +80,5 @@ def sensor_work_heading(robot_position, sensor_range, robot_belief, ground_truth
         y1 = y0 + np.sin(angle) * sensor_range
         x1_values.append(x1)
         y1_values.append(y1)    
-        robot_belief = collision_check(x0, y0, x1, y1, ground_truth, robot_belief)
 
-    return robot_belief
+    return sensor_sweep(x0, y0, np.asarray(x1_values), np.asarray(y1_values), ground_truth, robot_belief)

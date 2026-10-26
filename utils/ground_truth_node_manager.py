@@ -27,6 +27,7 @@ import numpy as np
 from utils.utils import *
 from parameter import *
 import utils.quads as quads
+from utils.graph_search import dijkstra_distances
 import matplotlib.pyplot as plt
 
 
@@ -71,7 +72,7 @@ class GroundTruthNodeManager:
 
         n_nodes = all_node_coords.shape[0]
         adjacent_matrix = np.ones((n_nodes, n_nodes)).astype(int)
-        node_coords_to_check = all_node_coords[:, 0] + all_node_coords[:, 1] * 1j
+        coordinate_to_index = {tuple(coords): i for i, coords in enumerate(all_node_coords)}
         for i, coords in enumerate(all_node_coords):
             node = self.nodes_dict.find((coords[0], coords[1])).data
             utility.append(node.utility)
@@ -80,8 +81,7 @@ class GroundTruthNodeManager:
             frontiers_distribution.append(node.frontiers_distribution)
             heading_visited.append(node.heading_visited)
             for neighbor in node.neighbor_list:
-                index = np.argwhere(node_coords_to_check == neighbor[0] + neighbor[1] * 1j)
-                index = index[0][0]
+                index = coordinate_to_index[(neighbor[0], neighbor[1])]
                 adjacent_matrix[i, index] = 0
 
         utility = np.array(utility)
@@ -90,13 +90,13 @@ class GroundTruthNodeManager:
         frontiers_distribution = np.array(frontiers_distribution)
         heading_visited = np.array(heading_visited)
 
-        current_index = np.argwhere(node_coords_to_check == robot_location[0] + robot_location[1] * 1j)[0][0]
+        current_index = coordinate_to_index[(robot_location[0], robot_location[1])]
         
 
         neighbor_indices = []
         current_node_in_belief = self.node_manager.nodes_dict.find(robot_location.tolist()).data
         for neighbor in current_node_in_belief.neighbor_list:
-            index = np.argwhere(node_coords_to_check == neighbor[0] + neighbor[1] * 1j)[0][0]
+            index = coordinate_to_index[(neighbor[0], neighbor[1])]
             neighbor_indices.append(index)
         neighbor_indices = np.sort(np.array(neighbor_indices))
 
@@ -121,17 +121,17 @@ class GroundTruthNodeManager:
         path_coords, dist = self.a_star(robot_location, nearest_utility_coords)
         guidepost = np.zeros_like(utility)
         for coords in path_coords:
-            index = np.argwhere(all_node_coords[:, 0] + all_node_coords[:, 1] * 1j == coords[0] + coords[1] * 1j)[0]
+            index = coordinate_to_index[(coords[0], coords[1])]
             guidepost[index] = 1
 
         robot_in_graph = self.nodes_dict.nearest_neighbors(robot_location.tolist(), 1)[0].data.coords
-        current_index = np.argwhere(node_coords_to_check == robot_in_graph[0] + robot_in_graph[1] * 1j)[0][0]
+        current_index = coordinate_to_index[(robot_in_graph[0], robot_in_graph[1])]
         neighbor_indices = np.argwhere(adjacent_matrix[current_index] == 0).reshape(-1)
 
         occupancy = np.zeros((n_nodes, 1))
         for location in robot_locations:
             location_in_graph = self.nodes_dict.find((location[0], location[1])).data.coords
-            index = np.argwhere(node_coords_to_check == location_in_graph[0] + location_in_graph[1] * 1j)[0][0]
+            index = coordinate_to_index[(location_in_graph[0], location_in_graph[1])]
             if index == current_index:
                 occupancy[index] = -1
             else:
@@ -199,48 +199,7 @@ class GroundTruthNodeManager:
         return [node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, node_frontiers_distribution, node_heading_visited]
     
     def Dijkstra(self, start):
-        q = set()
-        dist_dict = {}
-        prev_dict = {}
-
-        for node in self.nodes_dict.__iter__():
-            coords = node.data.coords
-            key = (coords[0], coords[1])
-            dist_dict[key] = 1e8
-            prev_dict[key] = None
-            q.add(key)
-
-        assert (start[0], start[1]) in dist_dict.keys()
-        dist_dict[(start[0], start[1])] = 0
-
-        while len(q) > 0:
-            u = None
-            for coords in q:
-                if u is None:
-                    u = coords
-                elif dist_dict[coords] < dist_dict[u]:
-                    u = coords
-
-            q.remove(u)
-
-            if self.nodes_dict.find(u) is None:
-                print(u)
-                for node in self.nodes_dict.__iter__():
-                    print(node.data.coords)
-
-            node = self.nodes_dict.find(u).data
-            for neighbor_node_coords in node.neighbor_list:
-                v = (neighbor_node_coords[0], neighbor_node_coords[1])
-                if v in q:
-                    cost = ((neighbor_node_coords[0] - u[0]) ** 2 + (
-                            neighbor_node_coords[1] - u[1]) ** 2) ** (1 / 2)
-                    cost = np.round(cost, 2)
-                    alt = dist_dict[u] + cost
-                    if alt < dist_dict[v]:
-                        dist_dict[v] = alt
-                        prev_dict[v] = u
-
-        return dist_dict, prev_dict
+        return dijkstra_distances(self.nodes_dict, start)
     
     def h(self, coords_1, coords_2):
         h = ((coords_1[0] - coords_2[0]) ** 2 + (coords_1[1] - coords_2[1]) ** 2) ** (1 / 2)

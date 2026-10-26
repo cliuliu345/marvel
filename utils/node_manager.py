@@ -18,6 +18,7 @@ import numpy as np
 from utils.utils import *
 from parameter import *
 import utils.quads as quads
+from utils.graph_search import dijkstra_distances
 
 
 class NodeManager:
@@ -81,7 +82,7 @@ class NodeManager:
 
         n_nodes = all_node_coords.shape[0]
         adjacent_matrix = np.ones((n_nodes, n_nodes)).astype(int)
-        node_coords_to_check = all_node_coords[:, 0] + all_node_coords[:, 1] * 1j
+        coordinate_to_index = {tuple(coords): i for i, coords in enumerate(all_node_coords)}
         for i, coords in enumerate(all_node_coords):
             node = self.nodes_dict.find((coords[0], coords[1])).data
             utility.append(node.utility)
@@ -90,9 +91,8 @@ class NodeManager:
             highest_utility_angle.append(node.highest_utility_angle)
 
             for neighbor in node.neighbor_list:
-                index = np.argwhere(node_coords_to_check == neighbor[0] + neighbor[1] * 1j)
-                if index or index == [[0]]:
-                    index = index[0][0]
+                index = coordinate_to_index.get((neighbor[0], neighbor[1]))
+                if index is not None:
                     adjacent_matrix[i, index] = 0
 
         utility = np.array(utility)
@@ -114,17 +114,17 @@ class NodeManager:
         path_coords, dist = self.a_star(robot_location, nearest_utility_coords)
         guidepost = np.zeros_like(utility)
         for coords in path_coords:
-            index = np.argwhere(all_node_coords[:, 0] + all_node_coords[:, 1] * 1j == coords[0] + coords[1] * 1j)[0]
+            index = coordinate_to_index[(coords[0], coords[1])]
             guidepost[index] = 1
 
         robot_in_graph = self.nodes_dict.nearest_neighbors(robot_location.tolist(), 1)[0].data.coords
-        current_index = np.argwhere(node_coords_to_check == robot_in_graph[0] + robot_in_graph[1] * 1j)[0][0]
+        current_index = coordinate_to_index[(robot_in_graph[0], robot_in_graph[1])]
         neighbor_indices = np.argwhere(adjacent_matrix[current_index] == 0).reshape(-1)
 
         occupancy = np.zeros((n_nodes, 1))
         for location in robot_locations:
             location_in_graph = self.nodes_dict.find((location[0], location[1])).data.coords
-            index = np.argwhere(node_coords_to_check == location_in_graph[0] + location_in_graph[1] * 1j)[0][0]
+            index = coordinate_to_index[(location_in_graph[0], location_in_graph[1])]
             if index == current_index:
                 occupancy[index] = -1
             else:
@@ -133,48 +133,7 @@ class NodeManager:
         return all_node_coords, utility, guidepost, occupancy, adjacent_matrix, current_index, neighbor_indices, highest_utility_angle, frontiers_distribution, heading_visited, path_coords
 
     def Dijkstra(self, start):
-        q = set()
-        dist_dict = {}
-        prev_dict = {}
-
-        for node in self.nodes_dict.__iter__():
-            coords = node.data.coords
-            key = (coords[0], coords[1])
-            dist_dict[key] = 1e8
-            prev_dict[key] = None
-            q.add(key)
-
-        assert (start[0], start[1]) in dist_dict.keys()
-        dist_dict[(start[0], start[1])] = 0
-
-        while len(q) > 0:
-            u = None
-            for coords in q:
-                if u is None:
-                    u = coords
-                elif dist_dict[coords] < dist_dict[u]:
-                    u = coords
-
-            q.remove(u)
-
-            if self.nodes_dict.find(u) is None:
-                print(u)
-                for node in self.nodes_dict.__iter__():
-                    print(node.data.coords)
-
-            node = self.nodes_dict.find(u).data
-            for neighbor_node_coords in node.neighbor_list:
-                v = (neighbor_node_coords[0], neighbor_node_coords[1])
-                if v in q:
-                    cost = ((neighbor_node_coords[0] - u[0]) ** 2 + (
-                            neighbor_node_coords[1] - u[1]) ** 2) ** (1 / 2)
-                    cost = np.round(cost, 2)
-                    alt = dist_dict[u] + cost
-                    if alt < dist_dict[v]:
-                        dist_dict[v] = alt
-                        prev_dict[v] = u
-
-        return dist_dict, prev_dict
+        return dijkstra_distances(self.nodes_dict, start)
 
     def get_Dijkstra_path_and_dist(self, dist_dict, prev_dict, end):
         if (end[0], end[1]) not in dist_dict:
