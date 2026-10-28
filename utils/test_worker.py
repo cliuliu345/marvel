@@ -38,10 +38,14 @@ class TestWorker:
 
         self.perf_metrics = dict()
 
+    def update_shared_graph(self):
+        for robot in self.robot_list:
+            robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy(), refresh_frontiers=False)
+        self.node_manager.refresh_frontier_cache(self.env.belief_info)
+
     def run_episode(self):
         done = False
-        for robot in self.robot_list:
-            robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
+        self.update_shared_graph()
         for robot in self.robot_list:    
             robot.update_planning_state(self.env.robot_locations)
         
@@ -138,7 +142,7 @@ class TestWorker:
             for robot, next_location, next_node_index in zip(self.robot_list, selected_locations, next_node_index_list):
                 self.env.final_sim_step(next_location, robot.id)
 
-                robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
+            self.update_shared_graph()
 
             overlap_rate = self.compute_overlap_rate(selected_locations, all_robots_heading_list)
 

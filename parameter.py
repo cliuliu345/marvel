@@ -48,6 +48,8 @@ FOV = 120   # in degrees
 V_FOV = 60
 MOUNTING_ANGLE = 15 # downwards
 NUM_ANGLES_BIN = 36
+NUM_DISTANCE_BINS = 10
+FRONTIER_REPRESENTATION_RANGE = 20.0  # meter, independent of sensor capability
 NUM_HEADING_CANDIDATES = 3
 DRONE_HEIGHT = 2
 

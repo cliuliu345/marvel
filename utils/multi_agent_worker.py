@@ -61,7 +61,7 @@ class MultiAgentWorker:
         self.ground_truth_node_manager = GroundTruthNodeManager(self.node_manager, self.env.ground_truth_info, self.sensor_range,
                                                                 device=self.device, plot=self.save_image)
 
-        self.robot_list = [Agent(i, policy_net, self.fov, self.env.angles[i], self.sensor_range, self.node_manager, self.ground_truth_node_manager, self.device, self.save_image) for i in
+        self.robot_list = [Agent(i, policy_net, self.fov, self.env.angles[i], self.sensor_range, self.node_manager, self.ground_truth_node_manager, self.device, self.save_image, sensor_capability=self.sensor_capabilities[i]) for i in
                            range(self.n_agents)]
 
         self.episode_buffer = []
@@ -69,10 +69,15 @@ class MultiAgentWorker:
         for i in range(NUM_EPISODE_BUFFER):
             self.episode_buffer.append([])
 
+    def update_shared_graph(self):
+        for robot in self.robot_list:
+            robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy(), refresh_frontiers=False)
+        self.node_manager.refresh_frontier_cache(self.env.belief_info)
+        self.ground_truth_node_manager.update_graph()
+
     def run_episode(self):
         done = False
-        for robot in self.robot_list:
-            robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
+        self.update_shared_graph()
         for robot in self.robot_list:    
             robot.update_planning_state(self.env.robot_locations)
 
@@ -189,7 +194,8 @@ class MultiAgentWorker:
                 trajectory_reward = np.cos(np.radians(robot.heading - trajectory_angle)) 
                 reward_list.append(utility_reward + trajectory_reward)  
 
-                robot.update_graph(self.env.belief_info, self.env.robot_locations[robot.id].copy())
+            # All rewards read the pre-macro-step cache; refresh only after all four.
+            self.update_shared_graph()
 
             if self.robot_list[0].utility.sum() == 0:
                 done = True

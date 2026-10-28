@@ -30,7 +30,7 @@ from utils.utils import *
 from parameter import *
 
 class Agent:
-    def __init__(self, id, policy_net, fov, heading, sensor_range, node_manager, ground_truth_node_manager, device='cpu', plot=False):
+    def __init__(self, id, policy_net, fov, heading, sensor_range, node_manager, ground_truth_node_manager, device='cpu', plot=False, sensor_capability=None):
         self.id = id
         self.device = device
         self.plot = plot
@@ -38,6 +38,10 @@ class Agent:
         self.fov = fov
         self.num_prev_headings = 3
         self.sensor_range = sensor_range
+        self.sensor_capability = None if sensor_capability is None else tuple(sensor_capability)
+        self.polar_frontiers = None
+        self.frontier_count_features = None
+        self.frontier_version = -1
         self.num_angles_bin = NUM_ANGLES_BIN
         self.num_heading_candidates = NUM_HEADING_CANDIDATES
 
@@ -103,11 +107,6 @@ class Agent:
 
         self.location = location
 
-        node = self.node_manager.nodes_dict.find(location.tolist())
-        if self.node_manager.nodes_dict.__len__() == 0:
-            pass
-        else:
-            node.data.set_visited(self.heading)
             
         if self.plot:
             self.trajectory_x.append(location[0])
@@ -165,19 +164,25 @@ class Agent:
 
         return updating_map_info
 
-    def update_graph(self, map_info, location):
+    def update_graph(self, map_info, location, refresh_frontiers=True):
         self.update_map(map_info)
         self.update_location(location)
         self.update_updating_map(self.location)
-        self.update_frontiers()
+        if refresh_frontiers:
+            self.update_frontiers()
         self.node_manager.update_graph(self.location,
                                        self.frontier,
                                        self.updating_map_info,
-                                       self.map_info)
+                                       self.map_info, refresh_frontiers=refresh_frontiers)
+        node = self.node_manager.nodes_dict.find(tuple(self.location)).data
+        actual_fov = None if self.sensor_capability is None else self.sensor_capability[0]
+        node.set_visited(self.heading, fov=actual_fov)
 
     def update_planning_state(self, robot_locations):
         self.node_coords, self.utility, self.guidepost, self.occupancy, self.adjacent_matrix, self.current_index, self.neighbor_indices, self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.path_coords = \
             self.node_manager.get_all_node_graph(self.location, robot_locations)
+        self.polar_frontiers, self.frontier_count_features = self.node_manager.get_polar_frontiers(self.node_coords)
+        self.frontier_version = self.node_manager.frontier_version
 
     def get_observation(self, pad=True):
         node_coords = self.node_coords
@@ -233,7 +238,7 @@ class Agent:
             current_edge = padding(current_edge)
         current_edge = current_edge.unsqueeze(-1)
      
-        node_neighbor_best_headings, self.neighbor_best_indices = self.compute_best_heading(node_coords, node_frontier_distribution, current_edge)
+        node_neighbor_best_headings, self.neighbor_best_indices = self.compute_best_heading(node_coords, node_frontier_distribution, current_edge, valid_neighbor_count=k_size)
 
         edge_padding_mask = torch.zeros((1, 1, k_size), dtype=torch.int16).to(self.device)
         edge_padding_mask[0, 0, current_in_edge] = 1
@@ -261,7 +266,74 @@ class Agent:
 
         return next_position, next_node_index, action_index, heading_index
     
-    def compute_best_heading(self, node_coords, frontier_distribution, neighbor_nodes):
+    def compute_best_heading(self, node_coords, frontier_distribution, neighbor_nodes, valid_neighbor_count=None):
+        if getattr(self, 'sensor_capability', None) is None:
+            return self._compute_legacy_best_heading(node_coords, frontier_distribution, neighbor_nodes)
+        fov, sensor_range = self.sensor_capability
+        neighbors = neighbor_nodes[0].reshape(-1).tolist()
+        if valid_neighbor_count is None:
+            valid_neighbor_count = len(neighbors)
+        if not 0 <= valid_neighbor_count <= len(neighbors):
+            raise ValueError('Invalid number of physical neighbors')
+        masks = torch.zeros((len(neighbors), self.num_heading_candidates, self.num_angles_bin))
+        indices = [np.zeros(self.num_heading_candidates, dtype=int) for _ in neighbors]
+        bin_headings = np.arange(self.num_angles_bin) * (360 / self.num_angles_bin)
+        for slot, node_index in enumerate(neighbors[:valid_neighbor_count]):
+            node = self.node_manager.nodes_dict.find(tuple(node_coords[node_index])).data
+            if node.frontier_version != self.node_manager.frontier_version:
+                raise RuntimeError('Candidate headings require the current shared frontier snapshot')
+            scores = node.candidate_heading_scores(fov, sensor_range)
+            if np.any(scores > 0):
+                # Positive-score ties retain ascending heading-bin order.
+                indices[slot] = np.argsort(-scores, kind='stable')[:self.num_heading_candidates]
+            else:
+                indices[slot] = self._fallback_heading_indices(node)
+            for candidate, center in enumerate(indices[slot]):
+                difference = (bin_headings - bin_headings[center] + 180) % 360 - 180
+                masks[slot, candidate] = torch.from_numpy((np.abs(difference) <= fov / 2).astype(np.float32))
+        return masks.unsqueeze(0).to(self.device), indices
+
+    def _fallback_heading_indices(self, node):
+        """Preserve MARVEL's A* / neighbor directions with distinct circular bins."""
+        def direction_bin(target):
+            delta = np.asarray(target) - node.coords
+            if not np.all(np.isfinite(delta)) or not np.any(delta):
+                return None
+            angle = np.degrees(np.arctan2(delta[1], delta[0])) % 360
+            return int(angle / 360 * self.num_angles_bin) % self.num_angles_bin
+
+        path = [] if self.path_coords is None else self.path_coords
+        # Original MARVEL targets path[1]; skip coincident points and also allow
+        # a one-point path when it supplies a real direction from this node.
+        for target in (path[1:] if len(path) > 1 else path):
+            center = direction_bin(target)
+            if center is not None:
+                return (center + np.arange(self.num_heading_candidates) -
+                        self.num_heading_candidates // 2) % self.num_angles_bin
+
+        candidates = []
+        for neighbor in node.neighbor_list[1:]:
+            center = direction_bin(neighbor)
+            if center is not None and center not in candidates:
+                candidates.append(center)
+                if len(candidates) == self.num_heading_candidates:
+                    return np.asarray(candidates, dtype=int)
+
+        # Keep existing neighbor order; fill shortages around its first direction.
+        # An isolated node has no geometric direction, so use the current heading.
+        center = candidates[0] if candidates else int(self.heading / 360 * self.num_angles_bin) % self.num_angles_bin
+        if not candidates:
+            return (center + np.arange(self.num_heading_candidates) -
+                    self.num_heading_candidates // 2) % self.num_angles_bin
+        for offset in range(1, self.num_angles_bin):
+            for signed_offset in (-offset, offset):
+                candidate = (center + signed_offset) % self.num_angles_bin
+                if candidate not in candidates:
+                    candidates.append(candidate)
+                    if len(candidates) == self.num_heading_candidates:
+                        return np.asarray(candidates, dtype=int)
+
+    def _compute_legacy_best_heading(self, node_coords, frontier_distribution, neighbor_nodes):
         neighbor_best_headings = []
         neighbor_best_indices = []
         half_fov_size = int((self.fov / 360) * self.num_angles_bin / 2)

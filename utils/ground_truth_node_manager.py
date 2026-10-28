@@ -302,7 +302,11 @@ class GroundTruthNodeManager:
             ground_truth_node.data.explored = 1
             ground_truth_node.data.frontiers_distribution = node.data.frontiers_distribution
             ground_truth_node.data.highest_utility_angle = node.data.highest_utility_angle
-            ground_truth_node.data.heading_visited = node.data.heading_visited
+            ground_truth_node.data.heading_visited = node.data.heading_visited.copy()
+            # New representation is copied from Belief only, never computed from GT.
+            ground_truth_node.data.frontier_histogram = node.data.frontier_histogram.copy()
+            ground_truth_node.data.frontier_count_feature = node.data.frontier_count_feature
+            ground_truth_node.data.frontier_version = node.data.frontier_version
 
     def get_ground_truth_node_coords(location, ground_truth_map_info):
         x_min = ground_truth_map_info.map_origin_x
@@ -357,6 +361,9 @@ class Node:
         self.highest_utility_angle = -360
         self.frontiers_distribution = np.zeros(num_angles_bin)
         self.heading_visited = np.zeros(num_angles_bin)
+        self.frontier_histogram = np.zeros((num_angles_bin, NUM_DISTANCE_BINS), dtype=np.int64)
+        self.frontier_count_feature = 0.0
+        self.frontier_version = -1
 
         self.neighbor_matrix = -np.ones((5, 5))
         self.neighbor_list = []

@@ -27,6 +27,8 @@ class NodeManager:
         self.plot = plot
         self.fov = fov
         self.sensor_range = sensor_range
+        self.frontier_version = 0
+        self.global_frontiers = frozenset()
         if utility_range is None:
             self.utility_range = UTILITY_RANGE
         else:
@@ -49,26 +51,45 @@ class NodeManager:
             neighbor_node.data.neighbor_list.remove(node.coords.tolist())
         self.nodes_dict.remove(node.coords.tolist())
 
-    def update_graph(self, robot_location, frontiers, updating_map_info, map_info):
+    def update_graph(self, robot_location, frontiers, updating_map_info, map_info, refresh_frontiers=True):
         node_coords, _ = get_updating_node_coords(robot_location, updating_map_info)
 
         all_node_list = []
         for coords in node_coords:
             node = self.check_node_exist_in_dict(coords)
             if node is None:
-                node = self.add_node_to_dict(coords, frontiers, updating_map_info)
+                node = self.add_node_to_dict(coords, frontiers if refresh_frontiers else set(), updating_map_info)
             else:
                 node = node.data
-                if node.utility == 0 or np.linalg.norm(node.coords - robot_location) > 2 * self.sensor_range:
-                    pass
-                else:
-                    node.update_node_observable_frontiers(frontiers, updating_map_info, map_info)
             all_node_list.append(node)
 
         for node in all_node_list:
             if node.need_update_neighbor and np.linalg.norm(node.coords - robot_location) < (
                     self.sensor_range + NODE_RESOLUTION):
                 node.update_neighbor_nodes(updating_map_info, self.nodes_dict)
+
+        if refresh_frontiers:
+            self.refresh_frontier_cache(map_info)
+
+    def refresh_frontier_cache(self, map_info):
+        """Refresh every node from one global Belief Map version, including zero-utility nodes."""
+        self.global_frontiers = frozenset(get_frontier_in_map(map_info))
+        self.frontier_version += 1
+        for entry in self.nodes_dict.__iter__():
+            entry.data.refresh_frontier_cache(self.global_frontiers, map_info, self.frontier_version)
+        return self.frontier_version
+
+    def get_polar_frontiers(self, node_coords):
+        """Return raw counts [N,36,10] and log1p totals in the caller's node order."""
+        histograms = np.zeros((len(node_coords), NUM_ANGLES_BIN, NUM_DISTANCE_BINS), dtype=np.int64)
+        totals = np.zeros(len(node_coords), dtype=float)
+        for i, coords in enumerate(node_coords):
+            node = self.nodes_dict.find(tuple(coords)).data
+            if node.frontier_version != self.frontier_version:
+                raise RuntimeError('Planning requested before the shared frontier refresh')
+            histograms[i] = node.frontier_histogram
+            totals[i] = node.frontier_count_feature
+        return histograms, totals
 
     def get_all_node_graph(self, robot_location, robot_locations):
         all_node_coords = []
@@ -233,7 +254,7 @@ class NodeManager:
 class Node:
     def __init__(self, coords, frontiers, updating_map_info, fov, sensor_range, utility_range=None):
         self.coords = coords
-        self.utility_range = utility_range
+        self.utility_range = UTILITY_RANGE if utility_range is None else utility_range
         self.utility = 0
         self.fov = fov
         self.highest_utility_angle = -360
@@ -241,6 +262,12 @@ class Node:
         self.sensor_range = sensor_range
         self.frontiers_distribution = np.zeros(self.num_angles_bin)
         self.heading_visited = np.zeros(self.num_angles_bin)
+        self.frontier_version = -1
+        self.frontier_histogram = np.zeros((self.num_angles_bin, NUM_DISTANCE_BINS), dtype=np.int64)
+        self.frontier_coords = np.empty((0, 2))
+        self.frontier_angles = np.empty(0)
+        self.frontier_distances = np.empty(0)
+        self.frontier_count_feature = 0.0
         self.observable_frontiers = self.initialize_observable_frontiers(frontiers, updating_map_info)
         self.visited = 0
 
@@ -250,49 +277,51 @@ class Node:
         self.need_update_neighbor = True
 
     def initialize_observable_frontiers(self, frontiers, updating_map_info):
-        if len(frontiers) == 0:
+        self.refresh_frontier_cache(frontiers, updating_map_info, version=-1)
+        return self.observable_frontiers
+
+    def refresh_frontier_cache(self, frontiers, map_info, version):
+        """20 m capability-independent LOS cache. No GT map or old-utility gate."""
+        points = np.asarray(sorted(frontiers), dtype=float).reshape(-1, 2)
+        distances = np.linalg.norm(points - self.coords, axis=1)
+        points = points[distances <= FRONTIER_REPRESENTATION_RANGE]
+        visible = [point for point in points if not check_collision(self.coords, point, map_info)]
+        self.frontier_coords = np.asarray(visible, dtype=float).reshape(-1, 2)
+        delta = self.frontier_coords - self.coords
+        self.frontier_distances = np.linalg.norm(delta, axis=1)
+        self.frontier_angles = np.degrees(np.arctan2(delta[:, 1], delta[:, 0])) % 360
+        self.frontier_histogram = np.zeros((self.num_angles_bin, NUM_DISTANCE_BINS), dtype=np.int64)
+        angle_bins = (self.frontier_angles / (360 / self.num_angles_bin)).astype(int)
+        distance_bins = np.minimum((self.frontier_distances / (FRONTIER_REPRESENTATION_RANGE / NUM_DISTANCE_BINS)).astype(int), NUM_DISTANCE_BINS - 1)
+        np.add.at(self.frontier_histogram, (angle_bins, distance_bins), 1)
+        self.frontier_count_feature = float(np.log1p(self.frontier_histogram.sum()))
+        self.frontier_version = version
+        self._update_legacy_frontier_features()
+
+    def _update_legacy_frontier_features(self):
+        """Keep old 36-D network/reward inputs until the network migration stage."""
+        selected = self.frontier_distances < self.utility_range
+        self.observable_frontiers = set(map(tuple, self.frontier_coords[selected]))
+        self.utility = len(self.observable_frontiers)
+        self.frontiers_distribution = np.zeros(self.num_angles_bin)
+        self.highest_utility_angle = -360
+        if self.utility <= MIN_UTILITY:
             self.utility = 0
-            return set()
-        else:
-            observable_frontiers = set()
-            frontiers = np.array(list(frontiers)).reshape(-1, 2)
-            dist_list = np.linalg.norm(frontiers - self.coords, axis=-1)
-            new_frontiers_in_range = frontiers[dist_list < self.utility_range]
-            for point in new_frontiers_in_range:
-                collision = check_collision(self.coords, point, updating_map_info)
-                if not collision:
-                    observable_frontiers.add((point[0], point[1]))
-            self.utility = len(observable_frontiers)
-            if self.utility <= MIN_UTILITY:
-                self.utility = 0
-                self.highest_utility_angle = -360
-                observable_frontiers = set()
-            else:
-                # Calculate angles for all observable frontiers
-                observable_frontiers_array = np.array(list(observable_frontiers))
-                angles = np.degrees(np.arctan2(observable_frontiers_array[:, 1] - self.coords[1], 
-                                               observable_frontiers_array[:, 0] - self.coords[0]) % (2 * np.pi))
+            self.observable_frontiers = set()
+            return
+        angles = self.frontier_angles[selected]
+        np.add.at(self.frontiers_distribution, (angles / (360 / self.num_angles_bin)).astype(int), 1)
+        half_width = int(self.fov * self.num_angles_bin / 720)
+        indices = (np.arange(self.num_angles_bin)[:, None] + np.arange(-half_width, half_width + 1)) % self.num_angles_bin
+        scores = self.frontiers_distribution[indices].sum(axis=1)
+        self.highest_utility_angle = int(np.argsort(-scores)[0]) * (360 / self.num_angles_bin)
 
-                for angle in angles:
-                    index = int(angle / 360 * self.num_angles_bin) % self.num_angles_bin
-                    self.frontiers_distribution[index] += 1
-              
-                if angles.shape[0] == 1:
-                    optimal_angle = angles[0]
-                else:
-                    half_fov_size = int((self.fov / 360)*self.num_angles_bin/2)
-                    window = np.concatenate((self.frontiers_distribution[-half_fov_size:], self.frontiers_distribution, self.frontiers_distribution[:half_fov_size]))
-                    indices = np.arange(len(self.frontiers_distribution)) + half_fov_size
-                    sum_vector = np.sum(np.take(window, indices.reshape(-1, 1) + np.arange(-half_fov_size, half_fov_size + 1)), axis=1)
-                    optimal_angle = np.argsort(-sum_vector)[0] * (360/self.num_angles_bin)
-               
-                if optimal_angle > 360:
-                    optimal_angle = optimal_angle - 360
-                    optimal_angle = 0 if optimal_angle == 360 else optimal_angle
-
-                self.highest_utility_angle = optimal_angle
-
-            return observable_frontiers
+    def candidate_heading_scores(self, fov, sensor_range):
+        """Exact V1 counts from raw geometry; histogram bins do not decide eligibility."""
+        headings = np.arange(self.num_angles_bin) * (360 / self.num_angles_bin)
+        difference = (self.frontier_angles[:, None] - headings[None, :] + 180) % 360 - 180
+        return ((self.frontier_distances[:, None] <= 0.9 * sensor_range) &
+                (np.abs(difference) <= fov / 2)).sum(axis=0)
 
     def update_neighbor_nodes(self, updating_map_info, nodes_dict):
         for i in range(self.neighbor_matrix.shape[0]):
@@ -322,58 +351,22 @@ class Node:
                             neighbor_node.neighbor_matrix[neighbor_matrix_x, neighbor_matrix_y] = 1
                             neighbor_node.neighbor_list.append(self.coords)
 
-        if self.utility == 0:
-            self.need_update_neighbor = False
-        elif 0 in self.neighbor_matrix is False:
+        # Frontier utility is not evidence that all local edges are resolved.
+        if not np.any(self.neighbor_matrix == -1):
             self.need_update_neighbor = False
 
     def update_node_observable_frontiers(self, frontiers, updating_map_info, map_info):
-        self.frontiers_distribution = np.zeros(self.num_angles_bin)
-        frontiers_observed = []
-        for frontier in self.observable_frontiers:
-            if not is_frontier(np.array([frontier[0], frontier[1]]), map_info):
-                frontiers_observed.append(frontier)
-        for frontier in frontiers_observed:
-            self.observable_frontiers.remove(frontier)
-        new_frontiers = frontiers - self.observable_frontiers
-        new_frontiers = np.array(list(new_frontiers)).reshape(-1, 2)
-        dist_list = np.linalg.norm(new_frontiers - self.coords, axis=-1)
-        new_frontiers_in_range = new_frontiers[dist_list < self.utility_range]
-        for point in new_frontiers_in_range:
-            collision = check_collision(self.coords, point, updating_map_info)
-            if not collision:
-                self.observable_frontiers.add((point[0], point[1]))
+        # Compatibility entry point; LOS always uses the global Belief Map.
+        self.refresh_frontier_cache(frontiers, map_info, self.frontier_version)
 
-        self.utility = len(self.observable_frontiers)
-        if self.utility <= MIN_UTILITY:
-            self.utility = 0
-            self.observable_frontiers = set()
-            self.highest_utility_angle = -360
-            self.need_update_neighbor = False
-        else:
-            observable_frontiers_array = np.array(list(self.observable_frontiers))
-            angles = np.degrees(np.arctan2(observable_frontiers_array[:, 1] - self.coords[1], 
-                                            observable_frontiers_array[:, 0] - self.coords[0]) % (2 * np.pi))
-            for angle in angles:
-                index = int(angle / 360 * self.num_angles_bin) % self.num_angles_bin
-                self.frontiers_distribution[index] += 1
-            
-            if angles.shape[0] == 1:
-                optimal_angle = angles[0]
-            else:
-                half_fov_size = int((self.fov / 360)*self.num_angles_bin/2)
-                window = np.concatenate((self.frontiers_distribution[-half_fov_size:], self.frontiers_distribution, self.frontiers_distribution[:half_fov_size]))
-                indices = np.arange(len(self.frontiers_distribution)) + half_fov_size
-                sum_vector = np.sum(np.take(window, indices.reshape(-1, 1) + np.arange(-half_fov_size, half_fov_size + 1)), axis=1)
-                optimal_angle = np.argsort(-sum_vector)[0] * (360/self.num_angles_bin)
-            if optimal_angle > 360:
-                optimal_angle = optimal_angle - 360
-                optimal_angle = 0 if optimal_angle == 360 else optimal_angle
-
-            self.highest_utility_angle = optimal_angle
-
-    def set_visited(self, heading):
+    def set_visited(self, heading, fov=None):
         self.visited = 1
+        if fov is not None:
+            bins = np.arange(self.num_angles_bin) * (360 / self.num_angles_bin)
+            difference = (bins - heading + 180) % 360 - 180
+            self.heading_visited[np.abs(difference) <= fov / 2] = 1
+            return
+        # Preserve the legacy call for callers without an explicit physical FoV.
         index = int(heading / 360 * self.num_angles_bin) % self.num_angles_bin
         half_fov_size = int((self.fov / 360) * self.num_angles_bin / 2)
         # Use the same inclusive circular window as heading candidates.
