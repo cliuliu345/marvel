@@ -45,8 +45,18 @@ class MultiAgentWorker:
         self.sensor_range = SENSOR_RANGE
         self.sim_steps = NUM_SIM_STEPS
 
-        self.env = Env(global_step, self.fov, self.sensor_range, plot=self.save_image)
         self.n_agents = N_AGENTS
+        if self.n_agents != 4 or len(EPISODE_SENSOR_CAPABILITIES) != self.n_agents:
+            raise ValueError('The heterogeneous V1 training team must contain four agents')
+        # Separate reproducible streams for each worker/episode; do not reseed
+        # NumPy's process-global RNG or depend on Ray process launch order.
+        self.episode_rng = np.random.default_rng(np.random.SeedSequence(
+            [ENV_SEED, self.meta_agent_id, self.global_step]))
+        self.sensor_capabilities = tuple(EPISODE_SENSOR_CAPABILITIES[i]
+                                         for i in self.episode_rng.permutation(self.n_agents))
+        self.env = Env(global_step, self.fov, self.sensor_range, plot=self.save_image,
+                       sensor_capabilities=self.sensor_capabilities, rng=self.episode_rng)
+        # Keep Agent/graph parameters unchanged until the frontier/learning stages.
         self.node_manager = NodeManager(self.fov, self.sensor_range, plot=self.save_image)
         self.ground_truth_node_manager = GroundTruthNodeManager(self.node_manager, self.env.ground_truth_info, self.sensor_range,
                                                                 device=self.device, plot=self.save_image)
@@ -138,7 +148,7 @@ class MultiAgentWorker:
                 robot_location_sim_step = []
                 robot_heading_sim_step = []
                 for q in range(self.n_agents):
-                    self.env.update_robot_belief(robot_locations_sim[q][l], robot_headings_sim[q][l])
+                    self.env.update_robot_belief(robot_locations_sim[q][l], robot_headings_sim[q][l], agent_id=q)
                     robot_location_sim_step.append(robot_locations_sim[q][l])
                     robot_heading_sim_step.append(robot_headings_sim[q][l])
                 
@@ -250,7 +260,6 @@ class MultiAgentWorker:
         plt.figure(figsize=(6, 2.5))
         color_list = ['r', 'b', 'g', 'y']
         color_name = ['Red', 'Blue', 'Green', 'Yellow']
-        sensing_range = self.sensor_range / CELL_SIZE
 
         plt.subplot(1, 3, 1)
         plt.imshow(self.env.robot_belief, cmap='gray')
@@ -286,6 +295,7 @@ class MultiAgentWorker:
 
         for i, (robot, location, heading) in enumerate(zip(self.robot_list, robot_locations, robot_headings)):
             c = color_list[robot.id]
+            sensing_range = self.sensor_capabilities[robot.id][1] / CELL_SIZE
             dx, dy = self.heading_to_vector(heading, length=sensing_range)
             arrow = FancyArrowPatch((location[0], location[1]), (location[0] + dx/1.25, location[1] + dy/1.25),
                                     mutation_scale=10,
@@ -314,13 +324,15 @@ class MultiAgentWorker:
         plt.ylim(ylim[0], ylim[1])
         for i, (location, heading) in enumerate(zip(robot_locations, robot_headings)):
             c = color_list[i]
+            fov, sensor_range = self.sensor_capabilities[i]
+            sensing_range = sensor_range / CELL_SIZE
             plt.plot(location[0], location[1], c+'o', markersize=6, zorder=5)
             dx, dy = self.heading_to_vector(heading, length=sensing_range)
             plt.arrow(location[0], location[1], dx, dy, head_width=5, head_length=5, fc=c, ec=c, zorder= 15)
 
             # Draw cone representing field of vision
-            cone = Wedge(center=(location[0], location[1]), r=self.sensor_range / CELL_SIZE, theta1=(heading-self.fov/2), 
-                         theta2=(heading+self.fov/2), color=c, alpha=0.5, zorder=10)
+            cone = Wedge(center=(location[0], location[1]), r=sensing_range, theta1=(heading-fov/2),
+                         theta2=(heading+fov/2), color=c, alpha=0.5, zorder=10)
             plt.gca().add_artist(cone)
             nodes = get_cell_position_from_coords(self.ground_truth_node_manager.ground_truth_node_coords, self.ground_truth_node_manager.ground_truth_map_info)
             plt.scatter(nodes[:, 0], nodes[:, 1], c=self.ground_truth_node_manager.explored_sign, s=8, zorder=2)

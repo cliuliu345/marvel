@@ -33,6 +33,11 @@ NUM_EPISODE_BUFFER = 40
 
 # Sim parameters
 N_AGENTS = 4
+# Physical sensors only; legacy graph/observation/reward parameters stay below.
+EPISODE_SENSOR_CAPABILITIES = ((180.0, 8.0), (180.0, 8.0), (70.0, 15.0), (70.0, 15.0))
+ENV_SEED = 0
+INITIAL_SCAN_FOV = 360.0
+INITIAL_SCAN_RANGE = 10.0  # meter, shared initialization prior
 USE_CONTINUOUS_SIM = True
 NUM_SIM_STEPS = 6
 VELOCITY = 1

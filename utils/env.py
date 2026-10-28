@@ -14,9 +14,21 @@ from utils.utils import *
 
 
 class Env:
-    def __init__(self, episode_index, fov, sensor_range, plot=False):
+    def __init__(self, episode_index, fov, sensor_range, plot=False, sensor_capabilities=None, rng=None):
         self.episode_index = episode_index
         self.plot = plot
+        self.n_agents = N_AGENTS
+        self.rng = np.random if rng is None else rng
+        # Keep scalar arguments for legacy planning/rewards. Physical scans use
+        # this immutable (FoV degrees, range meters) mapping indexed by agent ID.
+        if sensor_capabilities is None:
+            sensor_capabilities = ((fov, sensor_range),) * self.n_agents
+        self.sensor_capabilities = tuple((float(f), float(r)) for f, r in sensor_capabilities)
+        if len(self.sensor_capabilities) != self.n_agents:
+            raise ValueError('Expected one sensor capability per agent')
+        if any(not (np.isfinite(f) and np.isfinite(r) and 0 < f <= 360 and r > 0)
+               for f, r in self.sensor_capabilities):
+            raise ValueError('Sensor FoV must be in (0, 360] and range must be positive')
         self.ground_truth, initial_cell = self.import_ground_truth(episode_index)
         self.ground_truth_size = np.shape(self.ground_truth)  # cell
         self.cell_size = CELL_SIZE  # meter
@@ -31,25 +43,20 @@ class Env:
         self.fov = fov
         self.done = False
 
-        self.robot_belief = sensor_work_heading(initial_cell, self.sensor_range / self.cell_size, self.robot_belief,
-                                        self.ground_truth, 0, 360)
+        self.robot_belief = sensor_work_heading(initial_cell, INITIAL_SCAN_RANGE / self.cell_size, self.robot_belief,
+                                        self.ground_truth, 0, INITIAL_SCAN_FOV)
         self.belief_info = MapInfo(self.robot_belief, self.belief_origin_x, self.belief_origin_y, self.cell_size)
 
         free, _ = get_updating_node_coords(np.array([0.0, 0.0]), self.belief_info)
-        choice = np.random.choice(free.shape[0], N_AGENTS, replace=False)
+        choice = self.rng.choice(free.shape[0], self.n_agents, replace=False)
         starts = free[choice]
         self.robot_locations = np.array(starts)
 
         robot_cells = get_cell_position_from_coords(self.robot_locations, self.belief_info).reshape(-1, 2)
-        self.angles =  np.random.uniform(0, 360, size=N_AGENTS)   # Intialise the robot heading
+        self.angles = self.rng.uniform(0, 360, size=self.n_agents)   # Initialise the robot heading
         # World frame, origin pointing right
-        if N_AGENTS == 1:
-            self.robot_belief = sensor_work_heading(robot_cells, self.sensor_range / self.cell_size, self.robot_belief,
-                                            self.ground_truth, self.angles[0], self.fov)
-        else:
-            for i, robot_cell in enumerate(robot_cells):
-                self.robot_belief = sensor_work_heading(robot_cell, self.sensor_range / self.cell_size, self.robot_belief,
-                                                self.ground_truth, self.angles[i], self.fov)
+        for i, robot_cell in enumerate(robot_cells):
+            self.update_robot_belief(robot_cell, self.angles[i], agent_id=i)
         self.old_belief = deepcopy(self.robot_belief)
         self.global_frontiers = get_frontier_in_map(self.belief_info)
 
@@ -79,9 +86,18 @@ class Env:
         self.robot_cell = np.array([round((robot_location[0] - self.belief_origin_x) / self.cell_size),
                                     round((robot_location[1] - self.belief_origin_y) / self.cell_size)])
 
-    def update_robot_belief(self, robot_cell, heading):
-        self.robot_belief = sensor_work_heading(robot_cell, round(self.sensor_range / self.cell_size), self.robot_belief,
-                                        self.ground_truth, heading, self.fov)
+    def update_robot_belief(self, robot_cell, heading, agent_id=None):
+        if agent_id is None:
+            if len(set(self.sensor_capabilities)) != 1:
+                raise ValueError('agent_id is required for heterogeneous scans')
+            agent_id = 0  # Backward-compatible homogeneous scan call.
+        if not isinstance(agent_id, (int, np.integer)) or not 0 <= agent_id < self.n_agents:
+            raise ValueError('Invalid sensor agent_id')
+        fov, sensor_range = self.sensor_capabilities[agent_id]
+        # Keep the fractional cell range: 15 m / 0.4 m = 37.5 cells, not 38.
+        self.robot_belief = sensor_work_heading(robot_cell, sensor_range / self.cell_size, self.robot_belief,
+                                        self.ground_truth, heading, fov)
+        self.angles[agent_id] = heading
 
     def calculate_team_reward(self):
         reward = 0
@@ -107,12 +123,14 @@ class Env:
     def evaluate_exploration_rate(self):
         self.explored_rate = np.sum(self.robot_belief == 255) / np.sum(self.ground_truth == 255)
 
-    def step(self, next_waypoint, agent_id):
+    def step(self, next_waypoint, agent_id, heading=None):
         self.evaluate_exploration_rate()
         self.robot_locations[agent_id] = next_waypoint
         reward = 0
         cell = get_cell_position_from_coords(next_waypoint, self.belief_info)
-        self.update_robot_belief(cell)
+        if heading is None:
+            heading = self.angles[agent_id]
+        self.update_robot_belief(cell, heading, agent_id=agent_id)
 
         return reward
     
@@ -182,6 +200,5 @@ class Env:
         overlap_reward = (total_sensing_area - total_overlap_area) / total_sensing_area     
         
         return overlap_reward
-
 
 
