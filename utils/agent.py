@@ -255,7 +255,7 @@ class Agent:
 
         return [node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, all_node_frontier_distribution, node_heading_visited, node_neighbor_best_headings]
 
-    def get_actor_observation(self, pad=True):
+    def get_actor_observation(self, pad=True, allow_no_actions=False):
         """Build a V1 snapshot and its sole physical action table, without Replay writes."""
         if self.sensor_capability is None or self.team_sensor_capabilities is None or self.robot_locations is None:
             raise ValueError('V1 Actor requires physical capabilities and the team planning snapshot')
@@ -297,7 +297,7 @@ class Agent:
         current_edge[0, :k_size, 0] = tensor(neighbors, dtype=torch.long)
         edge_padding = torch.ones((1, 1, k_slots), dtype=torch.bool, device=self.device)
         edge_padding[0, 0, :k_size] = tensor(neighbors == self.current_index, dtype=torch.bool)
-        if edge_padding.all():
+        if edge_padding.all() and not allow_no_actions:
             raise ValueError('V1 Actor has no valid movement action')
         heading_masks, heading_bins = self.compute_best_heading(self.node_coords, None, current_edge,
                                                                valid_neighbor_count=k_size)

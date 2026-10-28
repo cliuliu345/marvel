@@ -67,6 +67,33 @@ class RLRunner(Runner):
         super().__init__(meta_agent_id)
 
 
+class V1Runner(Runner):
+    """Keep Runner's weight/job protocol, with V1 networks and joint results."""
+    def __init__(self, meta_agent_id, max_steps=MAX_EPISODE_STEP, record_joint=True,
+                 greedy=False, map_directory='maps_medium'):
+        from utils.model import CapabilityConditionedActor
+        self.meta_agent_id = meta_agent_id
+        self.device = torch.device('cuda') if USE_GPU else torch.device('cpu')
+        self.network = CapabilityConditionedActor().to(self.device)
+        self.max_steps = max_steps
+        self.record_joint = record_joint
+        self.greedy = greedy
+        self.map_directory = map_directory
+
+    def do_job(self, episode_number):
+        from utils.v1_worker import V1Worker
+        worker = V1Worker(self.meta_agent_id, self.network, episode_number, device=self.device,
+                          max_steps=self.max_steps, record_joint=self.record_joint,
+                          greedy=self.greedy, map_directory=self.map_directory)
+        worker.run_episode()
+        return worker.joint_transitions, worker.perf_metrics
+
+
+@ray.remote(num_cpus=1, num_gpus=gpu)
+class V1RLRunner(V1Runner):
+    pass
+
+
 if __name__ == '__main__':
     ray.init()
     runner = RLRunner.remote(0)

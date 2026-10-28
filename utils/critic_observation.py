@@ -24,9 +24,9 @@ class JointActionContext:
     """
     agent_ids: torch.Tensor                 # [4]
     current_coordinates: torch.Tensor       # [4,2]
-    commanded_coordinates: torch.Tensor     # [4,2]
+    commanded_coordinates: torch.Tensor | None  # [4,2]; absent for a terminal state
     capabilities: torch.Tensor              # [4,2]
-    action_slots: torch.Tensor              # [4]
+    action_slots: torch.Tensor | None       # [4]; absent for a terminal state
     action_tables: tuple
     frontier_version: int
 
@@ -41,8 +41,8 @@ class JointActionContext:
             raise ValueError('Joint commands require the four distinct Agent IDs')
         positions = torch.as_tensor(current_coordinates, dtype=torch.float32, device=device).detach().clone()
         caps = torch.as_tensor(capabilities, dtype=torch.float32, device=device).detach().clone()
-        slots = torch.as_tensor(action_slots, dtype=torch.long, device=device).detach().clone()
-        if positions.shape != (N_AGENTS, 2) or caps.shape != (N_AGENTS, 2) or slots.shape != (N_AGENTS,):
+        slots = None if action_slots is None else torch.as_tensor(action_slots, dtype=torch.long, device=device).detach().clone()
+        if positions.shape != (N_AGENTS, 2) or caps.shape != (N_AGENTS, 2) or (slots is not None and slots.shape != (N_AGENTS,)):
             raise ValueError('Joint command positions, capabilities or slots have invalid shapes')
         version = observations[0].action_table.frontier_version
         tables, goals = [], []
@@ -52,9 +52,10 @@ class JointActionContext:
                 raise ValueError('Joint commands must use one shared frontier version')
             if table.valid_mask.shape != (1, K_SIZE * NUM_HEADING_CANDIDATES):
                 raise ValueError('Joint V1 commands require padded 75-slot Actor tables')
-            slot = int(slots[row])
-            if not 0 <= slot < table.valid_mask.size(1) or not table.valid_mask[0, slot]:
-                raise ValueError('Original command selects an invalid Actor action slot')
+            if slots is not None:
+                slot = int(slots[row])
+                if not 0 <= slot < table.valid_mask.size(1) or not table.valid_mask[0, slot]:
+                    raise ValueError('Original command selects an invalid Actor action slot')
             if not torch.allclose(obs.self_capability[0], caps[row] / caps.new_tensor([180., 20.])):
                 raise ValueError('Joint command capability differs from its Actor observation')
             valid = table.valid_mask[0]
@@ -62,8 +63,9 @@ class JointActionContext:
             if not torch.allclose(relative, obs.node_inputs[0, table.node_indices[0, valid], :2], atol=1e-6):
                 raise ValueError('Joint current position differs from its Actor observation')
             tables.append(copy_action_table(table))
-            goals.append(table.node_coordinates[0, slot].detach().clone())
-        return cls(ids, positions, torch.stack(goals), caps, slots, tuple(tables), version)
+            if slots is not None:
+                goals.append(table.node_coordinates[0, slot].detach().clone())
+        return cls(ids, positions, torch.stack(goals) if goals else None, caps, slots, tuple(tables), version)
 
 
 @dataclass(frozen=True)
@@ -88,7 +90,7 @@ class CriticObservation:
     ego_agent_id: torch.Tensor              # [B,1]
     agent_ids: torch.Tensor                 # [B,4], explicit identity
     agent_current_indices: torch.Tensor    # [B,4], SAME GT as candidate_indices
-    agent_commanded_indices: torch.Tensor  # [B,4], original goals, SAME GT
+    agent_commanded_indices: torch.Tensor | None  # [B,4], SAME GT; absent only at terminal
     agent_capabilities: torch.Tensor       # [B,4,2], normalized
 
     @property

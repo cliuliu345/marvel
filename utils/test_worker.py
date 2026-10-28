@@ -157,8 +157,7 @@ class TestWorker:
                 trajectory_length = max([robot.travel_dist for robot in self.robot_list])
                 reach_checkpoint = True
 
-            if self.env.explored_rate > 0.99:
-                done = True
+            done = self.env.check_done()
 
             if done:
                 break

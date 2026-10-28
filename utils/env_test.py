@@ -26,6 +26,7 @@ from skimage.draw import polygon as sk_polygon
 
 
 from utils.sensor import sensor_work_heading
+from utils.v1_rewards import coverage_rate
 from test_parameter import *
 from utils.utils import *
 
@@ -117,11 +118,12 @@ class Env:
         return reward
 
     def check_done(self):
-        if np.sum(self.ground_truth == 255) - np.sum(self.robot_belief == 255) <= 250:
-            self.done = True
+        self.evaluate_exploration_rate()
+        self.done = self.explored_rate >= 0.99
+        return self.done
 
     def evaluate_exploration_rate(self):
-        self.explored_rate = np.sum(self.robot_belief == 255) / np.sum(self.ground_truth == 255)
+        self.explored_rate = coverage_rate(self.ground_truth, self.robot_belief)
 
     def step(self, next_waypoint, agent_id):
         self.evaluate_exploration_rate()

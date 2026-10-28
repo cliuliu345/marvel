@@ -112,9 +112,11 @@ class GroundTruthNodeManager:
         node_coordinates = torch.zeros((1, n_slots, 2), device=self.device)
         node_coordinates[0, :n_nodes] = tensor(coordinates)
         positions = joint_context.current_coordinates.detach().cpu().numpy()
-        commanded = joint_context.commanded_coordinates.detach().cpu().numpy()
         current_indices = tensor(indices_for(positions), torch.long)[None, :]
-        commanded_indices = tensor(indices_for(commanded), torch.long)[None, :]
+        commanded_indices = None
+        if joint_context.commanded_coordinates is not None:
+            commanded = joint_context.commanded_coordinates.detach().cpu().numpy()
+            commanded_indices = tensor(indices_for(commanded), torch.long)[None, :]
         ids = joint_context.agent_ids.to(self.device).clone()
         capabilities = joint_context.capabilities.to(self.device) / tensor([180., 20.])
         observations = []
@@ -160,7 +162,8 @@ class GroundTruthNodeManager:
                 self_capability=capabilities[row:row + 1].clone(), team_inputs=team_inputs,
                 team_padding_mask=torch.zeros((1, N_AGENTS - 1), dtype=torch.bool, device=self.device),
                 ego_agent_id=ids[row:row + 1][None, :].clone(), agent_ids=ids[None, :].clone(),
-                agent_current_indices=current_indices.clone(), agent_commanded_indices=commanded_indices.clone(),
+                agent_current_indices=current_indices.clone(),
+                agent_commanded_indices=None if commanded_indices is None else commanded_indices.clone(),
                 agent_capabilities=capabilities[None, :].clone()))
         return tuple(observations)
 

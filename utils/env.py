@@ -9,13 +9,16 @@ from skimage.draw import polygon as sk_polygon
 
 
 from utils.sensor import sensor_work_heading
+from utils.v1_rewards import coverage_rate
 from parameter import *
 from utils.utils import *
 
 
 class Env:
-    def __init__(self, episode_index, fov, sensor_range, plot=False, sensor_capabilities=None, rng=None):
+    def __init__(self, episode_index, fov, sensor_range, plot=False, sensor_capabilities=None, rng=None,
+                 map_directory='maps_medium'):
         self.episode_index = episode_index
+        self.map_directory = map_directory
         self.plot = plot
         self.n_agents = N_AGENTS
         self.rng = np.random if rng is None else rng
@@ -66,7 +69,7 @@ class Env:
             self.frame_files = []
 
     def import_ground_truth(self, episode_index):
-        map_dir = f'maps_medium'
+        map_dir = self.map_directory
         map_list = os.listdir(map_dir)
         map_index = episode_index % np.size(map_list)
         ground_truth = (io.imread(map_dir + '/' + map_list[map_index], 1)).astype(int)
@@ -117,11 +120,12 @@ class Env:
         return reward
 
     def check_done(self):
-        if np.sum(self.ground_truth == 255) - np.sum(self.robot_belief == 255) <= 250:
-            self.done = True
+        self.evaluate_exploration_rate()
+        self.done = self.explored_rate >= 0.99
+        return self.done
 
     def evaluate_exploration_rate(self):
-        self.explored_rate = np.sum(self.robot_belief == 255) / np.sum(self.ground_truth == 255)
+        self.explored_rate = coverage_rate(self.ground_truth, self.robot_belief)
 
     def step(self, next_waypoint, agent_id, heading=None):
         self.evaluate_exploration_rate()

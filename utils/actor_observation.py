@@ -16,7 +16,7 @@ class CandidateActionTable:
     node_coordinates: torch.Tensor
     heading_bins: torch.Tensor
     valid_mask: torch.Tensor
-    frontier_version: int
+    frontier_version: int | torch.Tensor  # Scalar snapshot, or [B] after V1 collation.
 
 
 @dataclass(frozen=True)

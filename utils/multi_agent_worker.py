@@ -38,7 +38,8 @@ if not os.path.exists(gifs_path):
     os.makedirs(gifs_path)
 
 class MultiAgentWorker:
-    def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', save_image=False, record_episode=True):
+    def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', save_image=False, record_episode=True,
+                 map_directory='maps_medium'):
         self.record_episode = record_episode
         if getattr(policy_net, 'uses_v1_actor_observation', False) and record_episode:
             raise ValueError('V1 Actor needs record_episode=False until Critic/Replay integration is implemented')
@@ -60,7 +61,7 @@ class MultiAgentWorker:
         self.sensor_capabilities = tuple(EPISODE_SENSOR_CAPABILITIES[i]
                                          for i in self.episode_rng.permutation(self.n_agents))
         self.env = Env(global_step, self.fov, self.sensor_range, plot=self.save_image,
-                       sensor_capabilities=self.sensor_capabilities, rng=self.episode_rng)
+                       sensor_capabilities=self.sensor_capabilities, rng=self.episode_rng, map_directory=map_directory)
         # Keep Agent/graph parameters unchanged until the frontier/learning stages.
         self.node_manager = NodeManager(self.fov, self.sensor_range, plot=self.save_image)
         self.ground_truth_node_manager = GroundTruthNodeManager(self.node_manager, self.env.ground_truth_info, self.sensor_range,
@@ -222,8 +223,7 @@ class MultiAgentWorker:
             # All rewards read the pre-macro-step cache; refresh only after all four.
             self.update_shared_graph()
 
-            if self.robot_list[0].utility.sum() == 0:
-                done = True
+            done = self.env.check_done()
 
             team_reward = self.env.calculate_team_reward() - 0.5
             if done:
