@@ -36,7 +36,10 @@ if not os.path.exists(gifs_path):
     os.makedirs(gifs_path)
 
 class MultiAgentWorker:
-    def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', save_image=False):
+    def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', save_image=False, record_episode=True):
+        self.record_episode = record_episode
+        if getattr(policy_net, 'uses_v1_actor_observation', False) and record_episode:
+            raise ValueError('V1 Actor needs record_episode=False until Critic/Replay integration is implemented')
         self.meta_agent_id = meta_agent_id
         self.global_step = global_step
         self.save_image = save_image
@@ -61,7 +64,7 @@ class MultiAgentWorker:
         self.ground_truth_node_manager = GroundTruthNodeManager(self.node_manager, self.env.ground_truth_info, self.sensor_range,
                                                                 device=self.device, plot=self.save_image)
 
-        self.robot_list = [Agent(i, policy_net, self.fov, self.env.angles[i], self.sensor_range, self.node_manager, self.ground_truth_node_manager, self.device, self.save_image, sensor_capability=self.sensor_capabilities[i]) for i in
+        self.robot_list = [Agent(i, policy_net, self.fov, self.env.angles[i], self.sensor_range, self.node_manager, self.ground_truth_node_manager, self.device, self.save_image, sensor_capability=self.sensor_capabilities[i], team_sensor_capabilities=self.sensor_capabilities) for i in
                            range(self.n_agents)]
 
         self.episode_buffer = []
@@ -89,14 +92,15 @@ class MultiAgentWorker:
             next_heading_index_list = []
             for robot in self.robot_list:
                 observation = robot.get_observation()
-                ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, self.env.robot_locations)
-
-                robot.save_observation(observation)
-                robot.save_ground_truth_observation(ground_truth_observation)
+                if self.record_episode:
+                    ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, self.env.robot_locations)
+                    robot.save_observation(observation)
+                    robot.save_ground_truth_observation(ground_truth_observation)
 
                 next_location, next_node_index, action_index, next_heading_index = robot.select_next_waypoint(observation)
 
-                robot.save_action(action_index)
+                if self.record_episode:
+                    robot.save_action(action_index)
 
                 selected_locations.append(next_location)
                 dist_list.append(np.linalg.norm(next_location - robot.location))
@@ -206,10 +210,12 @@ class MultiAgentWorker:
 
             curr_node_indices = np.array([robot.current_index for robot in self.robot_list])
             for robot, reward in zip(self.robot_list, reward_list):
-                robot.save_reward(reward + team_reward)
-                robot.save_all_indices(curr_node_indices)
+                if self.record_episode:
+                    robot.save_reward(reward + team_reward)
+                    robot.save_all_indices(curr_node_indices)
                 robot.update_planning_state(self.env.robot_locations)
-                robot.save_done(done)
+                if self.record_episode:
+                    robot.save_done(done)
 
             if done:
                 break
@@ -221,6 +227,8 @@ class MultiAgentWorker:
 
         # save episode buffer
         for robot in self.robot_list:
+            if not self.record_episode:
+                continue
             observation = robot.get_observation()
             ground_truth_observation = robot.ground_truth_node_manager.get_ground_truth_observation(robot.location, self.env.robot_locations)
             robot.save_next_observations(observation, next_node_index_list)

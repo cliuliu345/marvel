@@ -28,9 +28,10 @@ from skimage.draw import polygon as sk_polygon
 
 from utils.utils import *
 from parameter import *
+from utils.actor_observation import ActorObservation, CandidateActionTable
 
 class Agent:
-    def __init__(self, id, policy_net, fov, heading, sensor_range, node_manager, ground_truth_node_manager, device='cpu', plot=False, sensor_capability=None):
+    def __init__(self, id, policy_net, fov, heading, sensor_range, node_manager, ground_truth_node_manager, device='cpu', plot=False, sensor_capability=None, team_sensor_capabilities=None):
         self.id = id
         self.device = device
         self.plot = plot
@@ -39,6 +40,8 @@ class Agent:
         self.num_prev_headings = 3
         self.sensor_range = sensor_range
         self.sensor_capability = None if sensor_capability is None else tuple(sensor_capability)
+        self.team_sensor_capabilities = None if team_sensor_capabilities is None else tuple(map(tuple, team_sensor_capabilities))
+        self.robot_locations = None
         self.polar_frontiers = None
         self.frontier_count_features = None
         self.frontier_version = -1
@@ -179,12 +182,15 @@ class Agent:
         node.set_visited(self.heading, fov=actual_fov)
 
     def update_planning_state(self, robot_locations):
+        self.robot_locations = np.array(robot_locations, copy=True)
         self.node_coords, self.utility, self.guidepost, self.occupancy, self.adjacent_matrix, self.current_index, self.neighbor_indices, self.highest_utility_angles, self.frontier_distribution, self.heading_visited, self.path_coords = \
             self.node_manager.get_all_node_graph(self.location, robot_locations)
         self.polar_frontiers, self.frontier_count_features = self.node_manager.get_polar_frontiers(self.node_coords)
         self.frontier_version = self.node_manager.frontier_version
 
     def get_observation(self, pad=True):
+        if getattr(self.policy_net, 'uses_v1_actor_observation', False):
+            return self.get_actor_observation(pad=pad)
         node_coords = self.node_coords
         node_utility = self.utility.reshape(-1, 1)
         node_guidepost = self.guidepost.reshape(-1, 1)
@@ -249,7 +255,84 @@ class Agent:
 
         return [node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, all_node_frontier_distribution, node_heading_visited, node_neighbor_best_headings]
 
+    def get_actor_observation(self, pad=True):
+        """Build a V1 snapshot and its sole physical action table, without Replay writes."""
+        if self.sensor_capability is None or self.team_sensor_capabilities is None or self.robot_locations is None:
+            raise ValueError('V1 Actor requires physical capabilities and the team planning snapshot')
+        if self.frontier_version != self.node_manager.frontier_version:
+            raise RuntimeError('Update planning state before requesting a V1 Actor observation')
+        capabilities = np.asarray(self.team_sensor_capabilities, dtype=float)
+        if capabilities.shape != (N_AGENTS, 2) or self.robot_locations.shape != (N_AGENTS, 2):
+            raise ValueError('V1 Actor observation requires the fixed four-agent team')
+        if not np.array_equal(capabilities[self.id], self.sensor_capability):
+            raise ValueError('Agent ID does not match its physical capability')
+        n_nodes = len(self.node_coords)
+        n_slots = NODE_PADDING_SIZE if pad else n_nodes
+        if n_nodes > n_slots:
+            raise ValueError('Actor graph exceeds NODE_PADDING_SIZE')
+        neighbors = np.asarray(self.neighbor_indices)
+        k_size = len(neighbors)
+        k_slots = K_SIZE if pad else k_size
+        if not 0 < k_size <= K_SIZE:
+            raise ValueError('V1 Actor requires between one and 25 graph neighbors')
+
+        def tensor(values, dtype=torch.float32):
+            return torch.tensor(values, dtype=dtype, device=self.device)
+
+        node_inputs = torch.zeros((1, n_slots, ACTOR_NODE_INPUT_DIM), device=self.device)
+        features = np.concatenate(((self.node_coords - self.location) / ACTOR_COORDINATE_SCALE,
+                                   self.frontier_count_features[:, None], self.guidepost[:, None],
+                                   self.occupancy.reshape(-1, 1)), axis=-1)
+        node_inputs[0, :n_nodes] = tensor(features)
+        polar = torch.zeros((1, n_slots, NUM_ANGLES_BIN, NUM_DISTANCE_BINS), device=self.device)
+        polar[0, :n_nodes] = tensor(self.polar_frontiers)
+        history = torch.zeros((1, n_slots, NUM_ANGLES_BIN), device=self.device)
+        history[0, :n_nodes] = tensor(self.heading_visited)
+        node_padding = torch.ones((1, 1, n_slots), dtype=torch.bool, device=self.device)
+        node_padding[:, :, :n_nodes] = False
+        edge_mask = torch.ones((1, n_slots, n_slots), dtype=torch.bool, device=self.device)
+        edge_mask[0, :n_nodes, :n_nodes] = tensor(self.adjacent_matrix, dtype=torch.bool)
+        current_index = tensor([[[self.current_index]]], dtype=torch.long)
+        current_edge = torch.zeros((1, k_slots, 1), dtype=torch.long, device=self.device)
+        current_edge[0, :k_size, 0] = tensor(neighbors, dtype=torch.long)
+        edge_padding = torch.ones((1, 1, k_slots), dtype=torch.bool, device=self.device)
+        edge_padding[0, 0, :k_size] = tensor(neighbors == self.current_index, dtype=torch.bool)
+        if edge_padding.all():
+            raise ValueError('V1 Actor has no valid movement action')
+        heading_masks, heading_bins = self.compute_best_heading(self.node_coords, None, current_edge,
+                                                               valid_neighbor_count=k_size)
+        self.neighbor_best_indices = heading_bins  # Legacy diagnostics only; selection uses the snapshot table.
+
+        # IDs, not coordinate equality, exclude self. The current V1 team is fixed at four.
+        teammate_ids = np.arange(N_AGENTS)[np.arange(N_AGENTS) != self.id]
+        self_capability = tensor(capabilities[self.id] / np.array([180., 20.]))[None, :]
+        team_values = np.concatenate((capabilities[teammate_ids] / np.array([180., 20.]),
+                                      (self.robot_locations[teammate_ids] - self.location) / ACTOR_COORDINATE_SCALE), axis=-1)
+        team_inputs = tensor(team_values)[None, :, :]
+        team_padding = torch.zeros((1, len(teammate_ids)), dtype=torch.bool, device=self.device)
+
+        valid = (~edge_padding.squeeze(1)).repeat_interleave(NUM_HEADING_CANDIDATES, dim=1)
+        node_indices = current_edge.squeeze(-1).repeat_interleave(NUM_HEADING_CANDIDATES, dim=1)
+        coordinates = tensor(self.node_coords)[node_indices]
+        bins = tensor(np.asarray(heading_bins), dtype=torch.long).reshape(1, -1)
+        table = CandidateActionTable(node_indices.masked_fill(~valid, -1).clone(),
+                                     coordinates.masked_fill(~valid.unsqueeze(-1), 0).clone(),
+                                     bins.masked_fill(~valid, -1).clone(), valid.clone(), self.frontier_version)
+        return ActorObservation(node_inputs, node_padding, edge_mask, current_index, current_edge,
+                                edge_padding, polar, history, heading_masks, self_capability,
+                                team_inputs, team_padding, table)
+
     def select_next_waypoint(self, observation, greedy = False):
+        if isinstance(observation, ActorObservation):
+            with torch.no_grad():
+                logp = self.policy_net(*observation.network_inputs())
+            action_index = torch.argmax(logp, 1).long() if greedy else torch.multinomial(logp.exp(), 1).long().squeeze(1)
+            slot = action_index.item()
+            table = observation.action_table
+            if not table.valid_mask[0, slot].item():
+                raise RuntimeError('Actor selected an invalid action-table slot')
+            return (table.node_coordinates[0, slot].cpu().numpy().copy(),
+                    table.node_indices[0, slot].item(), action_index, table.heading_bins[0, slot].item())
         _, _, _, _, current_edge, _, _, _, _ = observation
         with torch.no_grad():
             logp = self.policy_net(*observation)
@@ -462,6 +545,8 @@ class Agent:
         return overlap_reward
         
     def save_observation(self, observation):
+        if isinstance(observation, ActorObservation):
+            raise RuntimeError('V1 Actor observations cannot enter legacy Replay; use Actor-only inference')
         node_inputs, node_padding_mask, edge_mask, current_index, current_edge, edge_padding_mask, frontier_distribution, heading_visited, neighbor_best_headings = observation
         self.episode_buffer[0] += node_inputs
         self.episode_buffer[1] += node_padding_mask.bool()
@@ -483,6 +568,8 @@ class Agent:
         self.episode_buffer[10] += torch.tensor([int(done)]).reshape(1, 1, 1).to(self.device)
 
     def save_next_observations(self, observation, next_node_index_list):
+        if isinstance(observation, ActorObservation):
+            raise RuntimeError('V1 Actor observations cannot enter legacy Replay; use Actor-only inference')
         self.episode_buffer[11] = copy.deepcopy(self.episode_buffer[0])[1:]
         self.episode_buffer[12] = copy.deepcopy(self.episode_buffer[1])[1:]
         self.episode_buffer[13] = copy.deepcopy(self.episode_buffer[2])[1:]

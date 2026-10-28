@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
+from parameter import ACTOR_NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, NUM_DISTANCE_BINS, K_SIZE
 
 class SingleHeadAttention(nn.Module):
     def __init__(self, embedding_dim):
@@ -281,6 +283,107 @@ class PolicyNet(nn.Module):
                                   enhanced_node_feature, current_edge, edge_padding_mask, headings_visited, neighbor_best_headings)
 
         return logp
+
+
+class PolarEncoder(nn.Module):
+    """Encode each node separately: log1p counts -> [16,18,5] -> 128."""
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Conv2d(1, 16, kernel_size=3, stride=(2, 2))
+        self.projection = nn.Linear(16 * 18 * 5, EMBEDDING_DIM)
+
+    def forward(self, histograms, node_padding_mask):
+        if histograms.ndim != 4 or histograms.shape[-2:] != (NUM_ANGLES_BIN, NUM_DISTANCE_BINS):
+            raise ValueError('Polar frontiers must have shape [B,N,36,10]')
+        batch_size, n_nodes = histograms.shape[:2]
+        padded = node_padding_mask.squeeze(1).bool()
+        histograms = histograms.masked_fill(padded[:, :, None, None], 0)
+        x = torch.log1p(histograms).reshape(batch_size * n_nodes, 1, NUM_ANGLES_BIN, NUM_DISTANCE_BINS)
+        x = F.pad(x, (0, 0, 1, 1), mode='circular')  # Angle only.
+        x = F.pad(x, (1, 1, 0, 0), mode='constant', value=0)  # Range only.
+        x = F.relu(self.conv(x))
+        x = self.projection(x.flatten(1)).reshape(batch_size, n_nodes, EMBEDDING_DIM)
+        return x.masked_fill(padded.unsqueeze(-1), 0)
+
+
+class CapabilityConditionedActor(nn.Module):
+    """V1 shared Actor. Legacy PolicyNet/QNet and Replay remain separate."""
+    uses_v1_actor_observation = True
+
+    def __init__(self):
+        super().__init__()
+        self.initial_embedding = nn.Linear(ACTOR_NODE_INPUT_DIM, EMBEDDING_DIM)
+        self.encoder = Encoder(embedding_dim=EMBEDDING_DIM, n_head=4, n_layer=6)
+        self.polar_encoder = PolarEncoder()
+        self.node_frontiers_embedding = nn.Linear(256, 128)
+        self.decoder = Decoder(embedding_dim=EMBEDDING_DIM, n_head=4, n_layer=1)
+        self.current_embedding = nn.Linear(256, 128)
+        self.self_mlp = nn.Sequential(nn.Linear(2, 64), nn.ReLU(), nn.Linear(64, 128))
+        self.team_mlp = nn.Sequential(nn.Linear(4, 64), nn.ReLU(), nn.Linear(64, 128))
+        self.capability_mlp = nn.Sequential(nn.Linear(385, 256), nn.ReLU(), nn.Linear(256, 128))
+        self.best_headings_embedding = nn.Linear(NUM_ANGLES_BIN, EMBEDDING_DIM)
+        self.visited_headings_embedding = nn.Linear(NUM_ANGLES_BIN, EMBEDDING_DIM)
+        self.action_mlp = nn.Sequential(nn.Linear(512, 256), nn.ReLU(), nn.Linear(256, 128))
+        self.pointer = SingleHeadAttention(EMBEDDING_DIM)
+
+    def encode_graph(self, node_inputs, node_padding_mask, edge_mask, polar_frontiers):
+        if node_inputs.shape[-1] != ACTOR_NODE_INPUT_DIM:
+            raise ValueError('V1 Actor requires five node features; legacy observations are unsupported')
+        padded = node_padding_mask.squeeze(1).bool().unsqueeze(-1)
+        graph_features = self.initial_embedding(node_inputs.masked_fill(padded, 0))
+        graph_features = self.encoder(graph_features, key_padding_mask=node_padding_mask, attn_mask=edge_mask)
+        polar_features = self.polar_encoder(polar_frontiers, node_padding_mask)
+        fused = self.node_frontiers_embedding(torch.cat((graph_features, polar_features), dim=-1))
+        return fused.masked_fill(padded, 0)
+
+    def decode_state(self, node_features, current_index, node_padding_mask):
+        current = torch.gather(node_features, 1, current_index.expand(-1, -1, EMBEDDING_DIM))
+        decoded, _ = self.decoder(current, node_features, node_padding_mask)
+        return self.current_embedding(torch.cat((decoded, current), dim=-1))
+
+    def encode_capability(self, self_capability, team_inputs, team_padding_mask):
+        padded = team_padding_mask.bool()
+        team_features = self.team_mlp(team_inputs.masked_fill(padded.unsqueeze(-1), 0))
+        count = (~padded).sum(dim=1, keepdim=True).to(team_features.dtype)
+        mean = team_features.masked_fill(padded.unsqueeze(-1), 0).sum(dim=1) / count.clamp_min(1)
+        if team_features.size(1):
+            maximum = team_features.masked_fill(padded.unsqueeze(-1), -torch.inf).max(dim=1).values
+            maximum = torch.where(count > 0, maximum, torch.zeros_like(maximum))
+        else:
+            maximum = torch.zeros_like(mean)
+        # n includes self: three valid teammates give log(4), none give log(1).
+        count_feature = torch.log1p(count)
+        return self.capability_mlp(torch.cat((self.self_mlp(self_capability), mean, maximum, count_feature), dim=-1))
+
+    def output_policy(self, state, node_features, current_edge, action_mask,
+                      headings_visited, neighbor_best_headings, capability):
+        batch_size, k_size, n_headings, _ = neighbor_best_headings.shape
+        neighbors = torch.gather(node_features, 1, current_edge.expand(-1, -1, EMBEDDING_DIM))
+        visited = self.visited_headings_embedding(headings_visited)
+        visited = torch.gather(visited, 1, current_edge.expand(-1, -1, EMBEDDING_DIM))
+        headings = self.best_headings_embedding(neighbor_best_headings)
+        features = torch.cat((neighbors[:, :, None, :].expand(-1, -1, n_headings, -1),
+                              headings, visited[:, :, None, :].expand(-1, -1, n_headings, -1),
+                              capability[:, None, None, :].expand(-1, k_size, n_headings, -1)), dim=-1)
+        actions = self.action_mlp(features).reshape(batch_size, k_size * n_headings, EMBEDDING_DIM)
+        return self.pointer(state, actions, action_mask).squeeze(1)
+
+    def forward(self, node_inputs, node_padding_mask, edge_mask, current_index,
+                current_edge, edge_padding_mask, polar_frontiers, headings_visited,
+                neighbor_best_headings, self_capability, team_inputs, team_padding_mask):
+        if current_edge.size(1) > K_SIZE or neighbor_best_headings.shape[2:] != (3, NUM_ANGLES_BIN):
+            raise ValueError('V1 supports at most 25 neighbors, each with three 36-bin headings')
+        node_invalid = torch.gather(node_padding_mask.bool(), 2, current_edge.transpose(1, 2))
+        self_target = (current_edge == current_index).transpose(1, 2)
+        invalid = edge_padding_mask.bool() | node_invalid | self_target
+        action_mask = invalid.repeat_interleave(3, dim=-1)
+        if action_mask.all(dim=-1).any():
+            raise ValueError('V1 Actor has no valid movement action; cannot apply ordinary softmax')
+        node_features = self.encode_graph(node_inputs, node_padding_mask, edge_mask, polar_frontiers)
+        state = self.decode_state(node_features, current_index, node_padding_mask)
+        capability = self.encode_capability(self_capability, team_inputs, team_padding_mask)
+        return self.output_policy(state, node_features, current_edge, action_mask,
+                                  headings_visited, neighbor_best_headings, capability)
 
 
 class QNet(nn.Module):
