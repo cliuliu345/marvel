@@ -84,6 +84,8 @@ NUM_META_AGENT = 4
 NODE_INPUT_DIM = 6  # Legacy PolicyNet/QNet input; do not change for the V1 Actor.
 ACTOR_NODE_INPUT_DIM = 5
 ACTOR_COORDINATE_SCALE = 40.0  # meter, shared node/team coordinate normalization
+CRITIC_NODE_INPUT_DIM = 6  # V1 GT features; legacy QNet still uses NODE_INPUT_DIM.
+CRITIC_COORDINATE_SCALE = 40.0
 EMBEDDING_DIM = 128
 
 # Graph parameters

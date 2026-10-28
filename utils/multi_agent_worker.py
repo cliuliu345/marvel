@@ -30,6 +30,8 @@ from utils.utils import *
 from utils.node_manager import NodeManager
 from utils.ground_truth_node_manager import GroundTruthNodeManager
 from utils.model import PolicyNet
+from utils.actor_observation import ActorObservation
+from utils.critic_observation import JointActionContext
 from utils.motion_model import compute_allowable_heading  
 
 if not os.path.exists(gifs_path):
@@ -68,6 +70,9 @@ class MultiAgentWorker:
                            range(self.n_agents)]
 
         self.episode_buffer = []
+        # Only the latest V1 decision snapshot; no new Replay fields or writes.
+        self.last_joint_action_context = None
+        self.last_critic_observations = None
         self.perf_metrics = dict()
         for i in range(NUM_EPISODE_BUFFER):
             self.episode_buffer.append([])
@@ -90,6 +95,8 @@ class MultiAgentWorker:
             dist_list = []
             next_node_index_list = []
             next_heading_index_list = []
+            actor_observations = []
+            action_slots = []
             for robot in self.robot_list:
                 observation = robot.get_observation()
                 if self.record_episode:
@@ -98,6 +105,9 @@ class MultiAgentWorker:
                     robot.save_ground_truth_observation(ground_truth_observation)
 
                 next_location, next_node_index, action_index, next_heading_index = robot.select_next_waypoint(observation)
+                if isinstance(observation, ActorObservation):
+                    actor_observations.append(observation)
+                    action_slots.append(action_index.item())
 
                 if self.record_episode:
                     robot.save_action(action_index)
@@ -108,6 +118,17 @@ class MultiAgentWorker:
                 next_heading_index_list.append(next_heading_index)
 
             selected_locations = np.array(selected_locations).reshape(-1, 2)
+            if actor_observations:
+                # Freeze policy commands and map all indices BEFORE collision
+                # resolution or any scan/map update can change the state.
+                context = JointActionContext.from_actor_observations(
+                    actor_observations, action_slots, [robot.id for robot in self.robot_list],
+                    np.array([robot.location for robot in self.robot_list]),
+                    [robot.sensor_capability for robot in self.robot_list])
+                if not np.array_equal(context.commanded_coordinates.cpu().numpy(), selected_locations):
+                    raise RuntimeError('Selected policy goals differ from the original Actor action tables')
+                self.last_joint_action_context = context
+                self.last_critic_observations = self.ground_truth_node_manager.get_critic_observations(context)
             arriving_sequence = np.argsort(np.array(dist_list))
             selected_locations_in_arriving_sequence = np.array(selected_locations)[arriving_sequence]
 

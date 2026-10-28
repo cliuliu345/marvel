@@ -28,6 +28,7 @@ from utils.utils import *
 from parameter import *
 import utils.quads as quads
 from utils.graph_search import dijkstra_distances
+from utils.critic_observation import CriticObservation, copy_action_table
 import matplotlib.pyplot as plt
 
 
@@ -52,6 +53,116 @@ class GroundTruthNodeManager:
         key = (coords[0], coords[1])
         exist = self.nodes_dict.find(key)
         return exist
+
+    def get_critic_observations(self, joint_context, pad=True):
+        """Map four Actor command tables onto ONE current GT graph snapshot.
+
+        GT supplies topology only. Frontier counts and history are copied from
+        the current Belief cache; no frontier extraction is performed on GT.
+        The legacy get_ground_truth_observation entry point remains unchanged.
+        """
+        version = self.node_manager.frontier_version
+        if joint_context.frontier_version != version:
+            raise RuntimeError('Critic commands and Belief cache must have the same frontier version')
+        entries = list(self.nodes_dict.__iter__())
+        coordinates = np.array([entry.data.coords for entry in entries])
+        n_nodes = len(coordinates)
+        n_slots = NODE_PADDING_SIZE if pad else n_nodes
+        if not 0 < n_nodes <= n_slots:
+            raise ValueError('Critic GT graph exceeds NODE_PADDING_SIZE or is empty')
+        coordinate_to_index = {tuple(coords): i for i, coords in enumerate(coordinates)}
+
+        def indices_for(physical_coordinates):
+            # Exact lattice-coordinate lookup; never reuse a Belief integer index
+            # or silently snap an absent commanded goal to another GT node.
+            try:
+                return [coordinate_to_index[tuple(coords)] for coords in physical_coordinates]
+            except KeyError as error:
+                raise ValueError('Physical command/current node is absent from the current GT graph') from error
+
+        def tensor(values, dtype=torch.float32):
+            return torch.tensor(values, dtype=dtype, device=self.device)
+
+        polar = torch.zeros((1, n_slots, NUM_ANGLES_BIN, NUM_DISTANCE_BINS), device=self.device)
+        history = torch.zeros((1, n_slots, NUM_ANGLES_BIN), device=self.device)
+        counts = np.zeros(n_nodes)
+        explored = np.zeros(n_nodes)
+        adjacency = torch.ones((1, n_slots, n_slots), dtype=torch.bool, device=self.device)
+        for index, entry in enumerate(entries):
+            node = entry.data
+            adjacency[0, index, indices_for(node.neighbor_list)] = False
+            belief = self.node_manager.nodes_dict.find(tuple(node.coords))
+            if belief is None:
+                continue
+            belief = belief.data
+            if belief.frontier_version != version:
+                raise RuntimeError('Critic requires every Belief node cache at the current version')
+            polar[0, index] = tensor(belief.frontier_histogram)
+            history[0, index] = tensor(belief.heading_visited)
+            counts[index] = belief.frontier_count_feature
+            explored[index] = 1
+
+        # Legacy GT observations put Belief nodes first. Preserve that order for
+        # equal-distance guide targets, independently of the GT tensor ordering.
+        utility_coordinates = [entry.data.coords for entry in self.node_manager.nodes_dict.__iter__()
+                               if entry.data.utility > 0]
+
+        padding = torch.ones((1, 1, n_slots), dtype=torch.bool, device=self.device)
+        padding[:, :, :n_nodes] = False
+        node_coordinates = torch.zeros((1, n_slots, 2), device=self.device)
+        node_coordinates[0, :n_nodes] = tensor(coordinates)
+        positions = joint_context.current_coordinates.detach().cpu().numpy()
+        commanded = joint_context.commanded_coordinates.detach().cpu().numpy()
+        current_indices = tensor(indices_for(positions), torch.long)[None, :]
+        commanded_indices = tensor(indices_for(commanded), torch.long)[None, :]
+        ids = joint_context.agent_ids.to(self.device).clone()
+        capabilities = joint_context.capabilities.to(self.device) / tensor([180., 20.])
+        observations = []
+        for row, source_table in enumerate(joint_context.action_tables):
+            if source_table.frontier_version != version:
+                raise RuntimeError('Actor action table has a stale frontier version')
+            table = copy_action_table(source_table)
+            # Tables originate from this worker/device, just as Actor observations do.
+            if table.node_coordinates.device != node_coordinates.device:
+                raise ValueError('Actor table and Critic observation must use the same device')
+            valid = table.valid_mask[0]
+            mapped = torch.zeros_like(table.node_indices)
+            mapped[0, valid] = tensor(indices_for(table.node_coordinates[0, valid].cpu().numpy()), torch.long)
+            current = int(current_indices[0, row])
+            # Preserve MARVEL's A* guide rule: nearest positive legacy utility,
+            # on GT topology, with utility supplied only by explored Belief nodes.
+            distances, _ = self.Dijkstra(positions[row])
+            target, nearest = positions[row], 1e8
+            for coords in utility_coordinates:
+                distance = distances[tuple(coords)]
+                if 0 < distance < nearest:
+                    target, nearest = coords, distance
+            path, _ = self.a_star(positions[row], target)
+            guide = np.zeros(n_nodes)
+            guide[indices_for(path)] = 1
+            occupancy = np.zeros(n_nodes)
+            occupancy[current_indices[0].cpu().numpy()] = 1
+            occupancy[current] = -1
+            features = np.concatenate(((coordinates - positions[row]) / CRITIC_COORDINATE_SCALE,
+                                       counts[:, None], guide[:, None], occupancy[:, None], explored[:, None]), axis=1)
+            node_inputs = torch.zeros((1, n_slots, CRITIC_NODE_INPUT_DIM), device=self.device)
+            node_inputs[0, :n_nodes] = tensor(features)
+            teammates = ids != ids[row]
+            relative_positions = (joint_context.current_coordinates.to(self.device) -
+                                  joint_context.current_coordinates[row].to(self.device)) / CRITIC_COORDINATE_SCALE
+            team_inputs = torch.cat((capabilities[teammates], relative_positions[teammates]), dim=-1)[None, :]
+            observations.append(CriticObservation(
+                node_inputs=node_inputs, node_coordinates=node_coordinates.clone(),
+                node_padding_mask=padding.clone(), edge_mask=adjacency.clone(),
+                current_index=current_indices[:, row:row + 1, None].clone(),
+                polar_frontiers=polar.clone(), heading_visited=history.clone(),
+                candidate_indices=mapped, action_table=table,
+                self_capability=capabilities[row:row + 1].clone(), team_inputs=team_inputs,
+                team_padding_mask=torch.zeros((1, N_AGENTS - 1), dtype=torch.bool, device=self.device),
+                ego_agent_id=ids[row:row + 1][None, :].clone(), agent_ids=ids[None, :].clone(),
+                agent_current_indices=current_indices.clone(), agent_commanded_indices=commanded_indices.clone(),
+                agent_capabilities=capabilities[None, :].clone()))
+        return tuple(observations)
 
     def get_ground_truth_observation(self, robot_location, robot_locations):
         self.update_graph()

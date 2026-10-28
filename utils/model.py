@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from parameter import ACTOR_NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, NUM_DISTANCE_BINS, K_SIZE
+from parameter import ACTOR_NODE_INPUT_DIM, CRITIC_NODE_INPUT_DIM, EMBEDDING_DIM, NUM_ANGLES_BIN, NUM_DISTANCE_BINS, K_SIZE
+from utils.critic_observation import CriticObservation
 
 class SingleHeadAttention(nn.Module):
     def __init__(self, embedding_dim):
@@ -384,6 +385,124 @@ class CapabilityConditionedActor(nn.Module):
         capability = self.encode_capability(self_capability, team_inputs, team_padding_mask)
         return self.output_policy(state, node_features, current_edge, action_mask,
                                   headings_visited, neighbor_best_headings, capability)
+
+
+class CapabilityConditionedCritic(nn.Module):
+    """One independent V1 GT Q network. Instantiate twice for Twin Q.
+
+    forward consumes CriticObservation, including the Actor CandidateActionTable.
+    Padding Q values are zero placeholders; action_table.valid_mask remains the
+    authority for future loss code. This network does not change the SAC path.
+    """
+    def __init__(self):
+        super().__init__()
+        self.initial_embedding = nn.Linear(CRITIC_NODE_INPUT_DIM, EMBEDDING_DIM)
+        self.encoder = Encoder(embedding_dim=EMBEDDING_DIM, n_head=4, n_layer=6)
+        self.polar_encoder = PolarEncoder()
+        self.node_frontiers_embedding = nn.Linear(256, 128)
+        self.decoder = Decoder(embedding_dim=EMBEDDING_DIM, n_head=4, n_layer=1)
+        self.current_embedding = nn.Linear(256, 128)
+        self.self_mlp = nn.Sequential(nn.Linear(2, 64), nn.ReLU(), nn.Linear(64, 128))
+        self.team_mlp = nn.Sequential(nn.Linear(4, 64), nn.ReLU(), nn.Linear(64, 128))
+        self.capability_mlp = nn.Sequential(nn.Linear(385, 256), nn.ReLU(), nn.Linear(256, 128))
+        self.best_headings_embedding = nn.Linear(NUM_ANGLES_BIN, EMBEDDING_DIM)
+        self.visited_headings_embedding = nn.Linear(NUM_ANGLES_BIN, EMBEDDING_DIM)
+        self.action_mlp = nn.Sequential(nn.Linear(512, 256), nn.ReLU(), nn.Linear(256, 128))
+        # The V1 384->128 teammate MLP has one affine layer, as in MARVEL.
+        self.all_agent_embedding = nn.Linear(384, 128)
+        self.agent_decoder = Decoder(embedding_dim=EMBEDDING_DIM, n_head=4, n_layer=1)
+        self.q_values_layer = nn.Sequential(nn.Linear(384, 128), nn.ReLU(), nn.Linear(128, 1))
+
+    def encode_graph(self, observation):
+        if observation.node_inputs.shape[-1] != CRITIC_NODE_INPUT_DIM:
+            raise ValueError('V1 Critic requires six GT node features')
+        padded = observation.node_padding_mask.squeeze(1).bool().unsqueeze(-1)
+        graph = self.initial_embedding(observation.node_inputs.masked_fill(padded, 0))
+        graph = self.encoder(graph, key_padding_mask=observation.node_padding_mask,
+                             attn_mask=observation.edge_mask)
+        polar = self.polar_encoder(observation.polar_frontiers, observation.node_padding_mask)
+        return self.node_frontiers_embedding(torch.cat((graph, polar), dim=-1)).masked_fill(padded, 0)
+
+    def decode_state(self, node_features, observation):
+        current = torch.gather(node_features, 1, observation.current_index.expand(-1, -1, EMBEDDING_DIM))
+        decoded, _ = self.decoder(current, node_features, observation.node_padding_mask)
+        return self.current_embedding(torch.cat((decoded, current), dim=-1))
+
+    def encode_capability(self, observation):
+        padded = observation.team_padding_mask.bool()
+        team = self.team_mlp(observation.team_inputs.masked_fill(padded.unsqueeze(-1), 0))
+        count = (~padded).sum(dim=1, keepdim=True).to(team.dtype)
+        mean = team.masked_fill(padded.unsqueeze(-1), 0).sum(dim=1) / count.clamp_min(1)
+        if team.size(1):
+            maximum = team.masked_fill(padded.unsqueeze(-1), -torch.inf).max(dim=1).values
+            maximum = torch.where(count > 0, maximum, torch.zeros_like(maximum))
+        else:
+            maximum = torch.zeros_like(mean)
+        return self.capability_mlp(torch.cat((self.self_mlp(observation.self_capability),
+                                             mean, maximum, torch.log1p(count)), dim=-1))
+
+    @staticmethod
+    def candidate_heading_masks(observation):
+        # Decode the Actor's existing bin with its actual FoV; do not run Top-3
+        # again. This is exactly Agent.compute_best_heading's circular mask.
+        table = observation.action_table
+        angles = torch.arange(NUM_ANGLES_BIN, device=table.heading_bins.device) * (360. / NUM_ANGLES_BIN)
+        centers = table.heading_bins.unsqueeze(-1) * (360. / NUM_ANGLES_BIN)
+        difference = (angles - centers + 180) % 360 - 180
+        half_fov = observation.self_capability[:, :1, None] * 180 / 2
+        masks = (difference.abs() <= half_fov) & table.valid_mask.unsqueeze(-1)
+        return masks.to(observation.node_inputs.dtype)
+
+    def encode_candidates(self, node_features, capability, observation):
+        indices = observation.candidate_indices.unsqueeze(-1).expand(-1, -1, EMBEDDING_DIM)
+        targets = torch.gather(node_features, 1, indices)
+        visited = self.visited_headings_embedding(observation.heading_visited)
+        visited = torch.gather(visited, 1, indices)
+        headings = self.best_headings_embedding(self.candidate_heading_masks(observation))
+        return self.action_mlp(torch.cat((targets, headings, visited,
+                                         capability[:, None, :].expand_as(targets)), dim=-1))
+
+    def decode_agent_actions(self, state, node_features, observation):
+        current = torch.gather(node_features, 1,
+                               observation.agent_current_indices.unsqueeze(-1).expand(-1, -1, EMBEDDING_DIM))
+        commanded = torch.gather(node_features, 1,
+                                 observation.agent_commanded_indices.unsqueeze(-1).expand(-1, -1, EMBEDDING_DIM))
+        # Teammate's OWN capability embedding, without its commanded heading.
+        capabilities = self.self_mlp(observation.agent_capabilities)
+        actions = self.all_agent_embedding(torch.cat((current, commanded, capabilities), dim=-1))
+        decoded, _ = self.agent_decoder(state, actions, observation.agent_mask)
+        return decoded
+
+    def forward(self, observation):
+        if not isinstance(observation, CriticObservation):
+            raise TypeError('V1 Critic requires a CriticObservation, not legacy Replay tensors')
+        valid = observation.action_table.valid_mask
+        if valid.shape != (observation.node_inputs.size(0), K_SIZE * 3) or (~valid).all(dim=1).any():
+            raise ValueError('V1 Critic requires 75 Actor slots and a nonempty valid action set')
+        # Reject mismatched physical mappings rather than silently valuing a
+        # different action at an otherwise plausible integer graph index.
+        mapped_coords = torch.gather(observation.node_coordinates, 1,
+                                     observation.candidate_indices.unsqueeze(-1).expand(-1, -1, 2))
+        if not torch.equal(mapped_coords[valid], observation.action_table.node_coordinates[valid]):
+            raise ValueError('Critic candidate mapping differs from the Actor physical action table')
+        candidate_padding = torch.gather(observation.node_padding_mask.squeeze(1), 1, observation.candidate_indices)
+        if candidate_padding[valid].any():
+            raise ValueError('A valid Actor candidate maps to GT padding')
+        bins = observation.action_table.heading_bins[valid]
+        if ((bins < 0) | (bins >= NUM_ANGLES_BIN)).any():
+            raise ValueError('Actor heading bins must be in [0,35]')
+        expected_ids = torch.arange(4, device=observation.agent_ids.device).expand(observation.node_inputs.size(0), -1)
+        if (not torch.equal(observation.agent_ids.sort(dim=1).values, expected_ids) or
+                not torch.all(observation.agent_mask.sum(-1) == 1)):
+            raise ValueError('Agent ID mask must exclude exactly self from the four-agent team')
+        nodes = self.encode_graph(observation)
+        state = self.decode_state(nodes, observation)
+        capability = self.encode_capability(observation)
+        candidates = self.encode_candidates(nodes, capability, observation)
+        teammates = self.decode_agent_actions(state, nodes, observation)
+        values = self.q_values_layer(torch.cat((state.expand_as(candidates), candidates,
+                                               teammates.expand_as(candidates)), dim=-1))
+        return values.masked_fill(~valid.unsqueeze(-1), 0)
 
 
 class QNet(nn.Module):
