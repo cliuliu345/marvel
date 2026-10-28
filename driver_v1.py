@@ -19,6 +19,7 @@ from utils.model import CapabilityConditionedActor
 from utils.runner import V1Runner, V1RLRunner
 from utils.v1_replay import JointReplayBuffer, collate_transitions
 from utils.v1_sac import V1SACLearner
+from utils.v1_tensorboard import tensorboard_writer, write_episode, write_update
 
 
 def build_parser():
@@ -39,11 +40,18 @@ def build_parser():
     parser.add_argument('--map-directory', default=None)
     parser.add_argument('--checkpoint')
     parser.add_argument('--checkpoint-out')
+    parser.add_argument('--tensorboard-logdir', default=None,
+                        help='Optional independent V1 event directory; disabled when omitted')
     parser.add_argument('--evaluate', action='store_true')
     return parser
 
 
 def run(args):
+    with tensorboard_writer(args.tensorboard_logdir) as writer:
+        return _run(args, writer)
+
+
+def _run(args, writer):
     if args.smoke:
         if args.evaluate:
             raise ValueError('--smoke is a training update check')
@@ -112,8 +120,11 @@ def run(args):
                 update.update(episode=info['episode_number'], update_seconds=time.perf_counter() - started)
                 updates.append(update)
                 print('V1_UPDATE ' + json.dumps(update), flush=True)
-        print('V1_EPISODE ' + json.dumps(dict(episode=info['episode_number'], worker_id=info['id'],
-                                            joint_replay_size=len(replay), **metrics)), flush=True)
+                write_update(writer, update)
+        episode_record = dict(episode=info['episode_number'], worker_id=info['id'],
+                              joint_replay_size=len(replay), **metrics)
+        print('V1_EPISODE ' + json.dumps(episode_record), flush=True)
+        write_episode(writer, episode_record)
 
     if args.ray_workers:
         import ray
