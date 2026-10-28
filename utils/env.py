@@ -72,7 +72,8 @@ class Env:
         map_dir = self.map_directory
         map_list = os.listdir(map_dir)
         map_index = episode_index % np.size(map_list)
-        ground_truth = (io.imread(map_dir + '/' + map_list[map_index], 1)).astype(int)
+        self.map_path = os.path.join(map_dir, map_list[map_index])
+        ground_truth = (io.imread(self.map_path, 1)).astype(int)
 
         ground_truth = block_reduce(ground_truth, 2, np.min)
 

@@ -1,4 +1,5 @@
 """V1 collection with original commands, executed motion and aligned next actions."""
+import time
 import numpy as np
 import torch
 
@@ -24,6 +25,9 @@ class V1Worker(MultiAgentWorker):
         self.record_joint = record_joint
         self.greedy = greedy
         self.joint_transitions = []
+        self.episode_returns = np.zeros(len(self.robot_list), dtype=float)
+        self.max_belief_nodes = self.max_gt_nodes = 0
+        self.min_valid_actions = None
 
     def build_state(self, terminal=False):
         observations = tuple(robot.get_actor_observation(allow_no_actions=terminal) for robot in self.robot_list)
@@ -34,6 +38,11 @@ class V1Worker(MultiAgentWorker):
             np.array([robot.location for robot in self.robot_list]),
             [robot.sensor_capability for robot in self.robot_list])
         critics = self.ground_truth_node_manager.get_critic_observations(context)
+        self.max_belief_nodes = max(self.max_belief_nodes, *(int((~obs.node_padding_mask).sum()) for obs in observations))
+        self.max_gt_nodes = max(self.max_gt_nodes, *(int((~obs.node_padding_mask).sum()) for obs in critics))
+        if not terminal:
+            minimum = min(int(obs.action_table.valid_mask.sum()) for obs in observations)
+            self.min_valid_actions = minimum if self.min_valid_actions is None else min(self.min_valid_actions, minimum)
         return JointState(observations, critics, context)
 
     def resolve_goals(self, context):
@@ -77,6 +86,7 @@ class V1Worker(MultiAgentWorker):
         return np.asarray(finals)
 
     def run_episode(self):
+        started = time.perf_counter()
         self.update_shared_graph()
         for robot in self.robot_list:
             robot.update_planning_state(self.env.robot_locations)
@@ -104,6 +114,7 @@ class V1Worker(MultiAgentWorker):
             terminated, truncated = episode_flags(self.env.explored_rate, completed_steps, self.max_steps)
             self.env.done = terminated
             rewards, components = reward_snapshot.finish_rewards(individual, self.node_manager.global_frontiers, terminated)
+            self.episode_returns += rewards
             # Nonterminal next commands are sampled ONCE and used unchanged at
             # the next iteration. At a time limit these commands are never executed.
             # Successful terminal states retain their graphs but issue no commands.
@@ -122,4 +133,9 @@ class V1Worker(MultiAgentWorker):
                 break
         self.perf_metrics.update(travel_dist=max(robot.travel_dist for robot in self.robot_list),
                                  explored_rate=self.env.explored_rate, success_rate=terminated,
-                                 terminated=terminated, truncated=truncated, macro_steps=completed_steps)
+                                 terminated=terminated, truncated=truncated, macro_steps=completed_steps,
+                                 termination_reason='success' if terminated else 'time_limit',
+                                 agent_returns=self.episode_returns.tolist(), total_reward=float(self.episode_returns.sum()),
+                                 max_belief_nodes=self.max_belief_nodes, max_gt_nodes=self.max_gt_nodes,
+                                 min_valid_actions=self.min_valid_actions, frontier_version=self.node_manager.frontier_version,
+                                 map_path=self.env.map_path, episode_seconds=time.perf_counter() - started)

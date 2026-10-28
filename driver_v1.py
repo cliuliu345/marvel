@@ -9,6 +9,7 @@ import argparse
 import json
 from pathlib import Path
 import random
+import time
 
 import numpy as np
 import torch
@@ -28,6 +29,10 @@ def build_parser():
     parser.add_argument('--max-steps', type=int, default=MAX_EPISODE_STEP)
     parser.add_argument('--joint-batch-size', type=int, default=1)
     parser.add_argument('--updates-per-episode', type=int, default=4)
+    parser.add_argument('--warmup-agent-samples', type=int, default=MINIMUM_BUFFER_SIZE,
+                        help='Agent samples required before updates; four per joint transition (default: 2000)')
+    parser.add_argument('--verify-updates', action='store_true',
+                        help='Record parameter changes and check finite parameters/gradients after each update')
     parser.add_argument('--ray-workers', type=int, default=0, help='0 runs the same Runner locally')
     parser.add_argument('--device', default='cpu', choices=('cpu', 'cuda'))
     parser.add_argument('--seed', type=int, default=0)
@@ -49,6 +54,8 @@ def run(args):
         raise ValueError('Episode/batch/update counts must be positive; Ray worker count must be nonnegative')
     if not 1 <= args.max_steps <= MAX_EPISODE_STEP:
         raise ValueError('Macro-step limit must be between 1 and 128')
+    if args.warmup_agent_samples < 0:
+        raise ValueError('Warm-up agent sample count must be nonnegative')
     if args.evaluate and not args.checkpoint:
         raise ValueError('Evaluation requires a V1 checkpoint')
     random.seed(args.seed)
@@ -78,22 +85,35 @@ def run(args):
         episode_metrics.append(metrics)
         for transition in transitions:
             replay.add(transition)
-        warm = args.smoke or len(replay) * N_AGENTS >= MINIMUM_BUFFER_SIZE
+        warm = args.smoke or len(replay) * N_AGENTS >= args.warmup_agent_samples
         if learner is not None and warm and len(replay) >= args.joint_batch_size:
             for _ in range(args.updates_per_episode):
+                started = time.perf_counter()
+                verify = args.smoke or args.verify_updates
                 tracked = dict(actor=learner.actor, q1=learner.q1, q2=learner.q2)
-                before = {name: [p.detach().clone() for p in model.parameters()] for name, model in tracked.items()} if args.smoke else {}
+                before = {name: [p.detach().clone() for p in model.parameters()] for name, model in tracked.items()} if verify else {}
                 alpha_before = learner.log_alpha.detach().clone()
                 batch = collate_transitions(replay.sample(args.joint_batch_size), learner.device)
                 update = learner.update(batch)
-                if args.smoke:
+                if verify:
                     update['parameter_max_deltas'] = {
                         name: max(float((p.detach() - old).abs().max()) for p, old in zip(model.parameters(), before[name]))
                         for name, model in tracked.items()}
                     update['parameter_max_deltas']['log_alpha'] = float((learner.log_alpha.detach() - alpha_before).abs().max())
+                    parameters = [p for model in tracked.values() for p in model.parameters()] + [learner.log_alpha]
+                    targets = list(learner.target_q1.parameters()) + list(learner.target_q2.parameters())
+                    update['parameters_finite'] = all(torch.isfinite(p).all().item() for p in parameters + targets)
+                    update['gradients_finite'] = all(p.grad is None or torch.isfinite(p.grad).all().item() for p in parameters)
+                    update['alpha_grad_norm'] = float(learner.log_alpha.grad.norm())
+                    if not update['parameters_finite'] or not update['gradients_finite']:
+                        raise FloatingPointError('Nonfinite V1 parameters or gradients after update')
+                    if not all(delta > 0 for delta in update['parameter_max_deltas'].values()):
+                        raise RuntimeError('V1 update verification found unchanged network or temperature parameters')
+                update.update(episode=info['episode_number'], update_seconds=time.perf_counter() - started)
                 updates.append(update)
                 print('V1_UPDATE ' + json.dumps(update), flush=True)
-        print('V1_EPISODE ' + json.dumps(dict(episode=info['episode_number'], joint_replay_size=len(replay), **metrics)), flush=True)
+        print('V1_EPISODE ' + json.dumps(dict(episode=info['episode_number'], worker_id=info['id'],
+                                            joint_replay_size=len(replay), **metrics)), flush=True)
 
     if args.ray_workers:
         import ray
