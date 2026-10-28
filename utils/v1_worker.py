@@ -1,4 +1,5 @@
 """V1 collection with original commands, executed motion and aligned next actions."""
+import json
 import time
 import numpy as np
 import torch
@@ -14,7 +15,7 @@ from utils.v1_rewards import FrontierRewardSnapshot, episode_flags
 
 class V1Worker(MultiAgentWorker):
     def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', max_steps=MAX_EPISODE_STEP,
-                 record_joint=True, greedy=False, map_directory='maps_medium'):
+                 record_joint=True, greedy=False, map_directory='maps_medium', gif_dir=None, gif_frame_every=1):
         if not getattr(policy_net, 'uses_v1_actor_observation', False):
             raise TypeError('V1Worker requires the capability-conditioned Actor')
         if not 1 <= max_steps <= MAX_EPISODE_STEP:
@@ -28,6 +29,22 @@ class V1Worker(MultiAgentWorker):
         self.episode_returns = np.zeros(len(self.robot_list), dtype=float)
         self.max_belief_nodes = self.max_gt_nodes = 0
         self.min_valid_actions = None
+        # Keep legacy plot flags off: V1 owns read-only macro-step visualization.
+        self.gif_recorder = None
+        if gif_dir is not None:
+            from utils.v1_gif import V1EpisodeGif
+            self.gif_recorder = V1EpisodeGif(gif_dir, global_step, meta_agent_id, gif_frame_every)
+
+    def _write_gif(self, method, *args, **kwargs):
+        try:
+            getattr(self.gif_recorder, method)(self, *args, **kwargs)
+        except Exception as error:
+            # Optional visualization must not discard a collected episode or
+            # prevent SAC updates; report failures separately from V1 metrics.
+            print('V1_GIF_ERROR ' + json.dumps(dict(episode=self.global_step, worker_id=self.meta_agent_id,
+                  stage=method, directory=str(self.gif_recorder.directory),
+                  error=f'{type(error).__name__}: {error}')), flush=True)
+            self.gif_recorder = None
 
     def build_state(self, terminal=False):
         observations = tuple(robot.get_actor_observation(allow_no_actions=terminal) for robot in self.robot_list)
@@ -93,6 +110,8 @@ class V1Worker(MultiAgentWorker):
         terminated = self.env.check_done()
         truncated, completed_steps = False, 0
         state = None if terminated else self.build_state()
+        if self.gif_recorder is not None:
+            self._write_gif('record', 0, final=terminated)
         for step in range(self.max_steps):
             if terminated:
                 break
@@ -129,8 +148,12 @@ class V1Worker(MultiAgentWorker):
                 validate_transition(transition)
                 self.joint_transitions.append(transition)
             state = next_state
+            if self.gif_recorder is not None:
+                self._write_gif('record', completed_steps, final=terminated or truncated)
             if terminated or truncated:
                 break
+        if self.gif_recorder is not None:
+            self._write_gif('finish')
         self.perf_metrics.update(travel_dist=max(robot.travel_dist for robot in self.robot_list),
                                  explored_rate=self.env.explored_rate, success_rate=terminated,
                                  terminated=terminated, truncated=truncated, macro_steps=completed_steps,

@@ -6,9 +6,11 @@ Evaluation: --evaluate --checkpoint PATH --map-directory maps_test --episodes N
 Batch size counts joint macro steps; one joint sample expands to four agents.
 """
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import random
+import tempfile
 import time
 
 import numpy as np
@@ -42,6 +44,12 @@ def build_parser():
     parser.add_argument('--checkpoint-out')
     parser.add_argument('--tensorboard-logdir', default=None,
                         help='Optional independent V1 event directory; disabled when omitted')
+    parser.add_argument('--save-gif-every', type=int, default=0,
+                        help='Save episodes whose absolute episode number is divisible by N; 0 disables GIFs')
+    parser.add_argument('--gif-dir', default='gifs/v1',
+                        help='GIF root; enabled runs create a unique subdirectory')
+    parser.add_argument('--gif-frame-every', type=int, default=1,
+                        help='Capture every N macro steps, plus the initial and final states')
     parser.add_argument('--evaluate', action='store_true')
     return parser
 
@@ -64,6 +72,8 @@ def _run(args, writer):
         raise ValueError('Macro-step limit must be between 1 and 128')
     if args.warmup_agent_samples < 0:
         raise ValueError('Warm-up agent sample count must be nonnegative')
+    if args.save_gif_every < 0 or args.gif_frame_every < 1:
+        raise ValueError('GIF episode interval must be nonnegative and frame interval must be positive')
     if args.evaluate and not args.checkpoint:
         raise ValueError('Evaluation requires a V1 checkpoint')
     random.seed(args.seed)
@@ -84,6 +94,13 @@ def _run(args, writer):
     map_directory = args.map_directory or ('maps_test' if args.evaluate else 'maps_medium')
     runner_options = dict(max_steps=args.max_steps, record_joint=not args.evaluate,
                           greedy=args.evaluate, map_directory=map_directory)
+    if args.save_gif_every:
+        root = Path(args.gif_dir).expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S_%fZ')
+        run_dir = tempfile.mkdtemp(prefix=f'run_{stamp}_seed{args.seed}_', dir=root)
+        runner_options.update(save_gif_every=args.save_gif_every, gif_dir=run_dir,
+                              gif_frame_every=args.gif_frame_every)
 
     def weights():
         return [{name: value.detach().cpu().clone() for name, value in actor.state_dict().items()}]

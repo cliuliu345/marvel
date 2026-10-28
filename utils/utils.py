@@ -169,8 +169,16 @@ def check_collision(start, end, map_info):
     return check_collision_cells(start_cell, end_cell, map_info.map, OCCUPIED, UNKNOWN)
 
 
-def make_gif(path, n, frame_files, rate):
-    with imageio.get_writer('{}/{}_explored_rate_{:.4g}.gif'.format(path, n, rate), mode='I', duration=1) as writer:
+def make_gif(path, n, frame_files, rate, *, frame_duration=None):
+    # Public opt-in timing is in seconds; the modern Pillow plugin needs ms.
+    # Retain the legacy writer defaults for callers that do not opt in.
+    output = '{}/{}_explored_rate_{:.4g}.gif'.format(path, n, rate)
+    options = dict(mode='I', duration=1)
+    if frame_duration is not None:
+        if frame_duration <= 0:
+            raise ValueError('GIF frame duration must be positive')
+        options.update(format='pillow', duration=frame_duration * 1000, loop=0)
+    with imageio.get_writer(output, **options) as writer:
         for frame in frame_files:
             image = imageio.imread(frame)
             writer.append_data(image)
@@ -178,6 +186,7 @@ def make_gif(path, n, frame_files, rate):
 
     for filename in frame_files[:-1]:
         os.remove(filename)
+    return output
 
 def make_gif_test(path, n, frame_files, rate, n_agents, fov, sensor_range):
     with imageio.get_writer('{}/{}_{}_{}_{}_explored_rate_{:.4g}.gif'.format(path, n, n_agents, fov, sensor_range, rate), mode='I', duration=1) as writer:

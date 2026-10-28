@@ -70,7 +70,8 @@ class RLRunner(Runner):
 class V1Runner(Runner):
     """Keep Runner's weight/job protocol, with V1 networks and joint results."""
     def __init__(self, meta_agent_id, max_steps=MAX_EPISODE_STEP, record_joint=True,
-                 greedy=False, map_directory='maps_medium'):
+                 greedy=False, map_directory='maps_medium', save_gif_every=0,
+                 gif_dir=None, gif_frame_every=1):
         from utils.model import CapabilityConditionedActor
         self.meta_agent_id = meta_agent_id
         self.device = torch.device('cuda') if USE_GPU else torch.device('cpu')
@@ -79,12 +80,19 @@ class V1Runner(Runner):
         self.record_joint = record_joint
         self.greedy = greedy
         self.map_directory = map_directory
+        if save_gif_every < 0 or gif_frame_every < 1 or (save_gif_every and gif_dir is None):
+            raise ValueError('GIF recording requires valid intervals and an output directory')
+        self.save_gif_every = save_gif_every
+        self.gif_dir = gif_dir
+        self.gif_frame_every = gif_frame_every
 
     def do_job(self, episode_number):
         from utils.v1_worker import V1Worker
+        save_gif = self.save_gif_every > 0 and episode_number % self.save_gif_every == 0
         worker = V1Worker(self.meta_agent_id, self.network, episode_number, device=self.device,
                           max_steps=self.max_steps, record_joint=self.record_joint,
-                          greedy=self.greedy, map_directory=self.map_directory)
+                          greedy=self.greedy, map_directory=self.map_directory,
+                          gif_dir=self.gif_dir if save_gif else None, gif_frame_every=self.gif_frame_every)
         worker.run_episode()
         return worker.joint_transitions, worker.perf_metrics
 
