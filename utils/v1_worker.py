@@ -16,13 +16,17 @@ from utils.v1_rewards import FrontierRewardSnapshot, episode_flags
 class V1Worker(MultiAgentWorker):
     def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', max_steps=MAX_EPISODE_STEP,
                  record_joint=True, greedy=False, map_directory='maps_medium', gif_dir=None, gif_frame_every=1,
-                 stagnation_recovery=False, map_path=None):
+                 stagnation_recovery=False, map_path=None, diagnostic_policy=None):
         if not getattr(policy_net, 'uses_v1_actor_observation', False):
             raise TypeError('V1Worker requires the capability-conditioned Actor')
         if not 1 <= max_steps <= MAX_EPISODE_STEP:
             raise ValueError('V1 episodes allow at most 128 macro steps')
         super().__init__(meta_agent_id, policy_net, global_step, device=device,
                          record_episode=False, map_directory=map_directory, map_path=map_path)
+        if diagnostic_policy not in (None, 'guidepost', 'random_uniform') or (diagnostic_policy and record_joint):
+            raise ValueError('Rule policies are only available for diagnostic evaluation')
+        self.diagnostic_policy = diagnostic_policy
+        self.decision_records = []
         self.max_steps = max_steps
         self.record_joint = record_joint
         self.greedy = greedy
@@ -58,11 +62,19 @@ class V1Worker(MultiAgentWorker):
 
     def build_state(self, terminal=False):
         observations = tuple(robot.get_actor_observation(allow_no_actions=terminal) for robot in self.robot_list)
-        slots = None if terminal else [robot.select_next_waypoint(obs, greedy=self.greedy)[2].item()
-                                      for robot, obs in zip(self.robot_list, observations)]
+        slots = None
+        if not terminal:
+            from utils.v1_diagnostics import select_diagnostic_slot
+            slots = [select_diagnostic_slot(self.diagnostic_policy, robot, obs) if self.diagnostic_policy
+                     else robot.select_next_waypoint(obs, greedy=self.greedy)[2].item()
+                     for robot, obs in zip(self.robot_list, observations)]
         if self.recovery is not None and not terminal:
             slots = self.recovery.select(self.robot_list, observations, slots, self.completed_steps + 1,
                                          bootstrap_only=self.completed_steps >= self.max_steps)
+        if not terminal and self.completed_steps < self.max_steps:
+            from utils.v1_diagnostics import decision_record
+            self.decision_records.extend(decision_record(robot, obs, slot, self.completed_steps + 1)
+                                         for robot, obs, slot in zip(self.robot_list, observations, slots))
         context = JointActionContext.from_actor_observations(
             observations, slots, [robot.id for robot in self.robot_list],
             np.array([robot.location for robot in self.robot_list]),
@@ -199,7 +211,11 @@ class V1Worker(MultiAgentWorker):
                                  min_valid_actions=self.min_valid_actions, frontier_version=self.node_manager.frontier_version,
                                  map_path=self.env.map_path, episode_seconds=time.perf_counter() - started)
 
+        from utils.v1_diagnostics import summarize_decisions
+        self.perf_metrics.update(summarize_decisions(self.decision_records))
         self.perf_metrics['behavior_policy'] = ('Actor + Stagnation Recovery' if self.recovery is not None
                                                 else 'Actor')
+        if self.diagnostic_policy:
+            self.perf_metrics['behavior_policy'] = self.diagnostic_policy + (' + Stagnation Recovery' if self.recovery else '')
         if self.recovery is not None:
             self.perf_metrics.update(self.recovery.metrics())

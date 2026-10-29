@@ -16,12 +16,13 @@ import torch
 from utils.model import CapabilityConditionedActor
 from utils.runner import V1Runner
 from utils.v1_runtime import episode_error_info
+from utils.v1_diagnostics import aggregate_behavior
 
 COUNTERS = ('conflict_replacements', 'conflict_nonadjacent', 'conflict_stay',
             'recovery_trigger_count', 'recovery_override_count', 'recovery_executed_overrides',
             'recovery_blocked_decisions', 'recovery_execution_conflicts', 'stagnation_cycle_agent_steps')
 COLUMNS = ('map_path', 'terminated', 'macro_steps', 'explored_rate', 'travel_dist', *COUNTERS,
-           'episode_seconds', 'error')
+           'episode_seconds', 'error', 'guidepost_agreement', 'guidepost_eligible', 'top1_heading_rate', 'decisions')
 
 
 def select_maps(directory, count, seed):
@@ -46,7 +47,7 @@ def summarize(rows):
                 explored_rate_p10=float(np.percentile(coverage, 10)) if len(coverage) else None,
                 explored_rate_p50=float(np.percentile(coverage, 50)) if len(coverage) else None,
                 success_mean_steps=float(np.mean([r['macro_steps'] for r in successes])) if successes else None,
-                error_count=len(rows)-len(valid), errors=errors)
+                error_count=len(rows)-len(valid), errors=errors, **aggregate_behavior(valid))
 
 
 def check_one(weights, directory, name, episode, worker_id, seed, policy, recovery):
@@ -60,8 +61,9 @@ def check_one(weights, directory, name, episode, worker_id, seed, policy, recove
     started = time.perf_counter()
     try:
         runner = V1Runner(worker_id, record_joint=False, greedy=policy == 'greedy',
-                          map_directory=directory, stagnation_recovery=recovery == 'on')
-        transitions, metrics, info = runner.job([weights], episode)
+                          map_directory=directory, stagnation_recovery=recovery == 'on',
+                          diagnostic_policy=policy if policy in ('guidepost', 'random_uniform') else None)
+        transitions, metrics, info = runner.job([weights], episode, map_path=os.path.join(directory, name))
         assert not transitions
         if info.get('error'):
             error = info['error_type'] + ': ' + info['error_message']
@@ -84,7 +86,7 @@ def main(argv=None):
     parser.add_argument('--num-maps', type=int, default=50)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--checkpoint')
-    parser.add_argument('--policy', choices=('sample', 'greedy'), default='sample')
+    parser.add_argument('--policy', choices=('sample', 'greedy', 'guidepost', 'random_uniform'), default='sample')
     parser.add_argument('--recovery', choices=('off', 'on'), default='off')
     parser.add_argument('--workers', type=int, default=6)
     parser.add_argument('--output', help='New CSV path; refuses to overwrite an existing file')
@@ -93,13 +95,16 @@ def main(argv=None):
         parser.error('workers must be positive')
     torch.set_num_threads(1)
     torch.manual_seed(args.seed)
-    actor = CapabilityConditionedActor()
+    rule = args.policy in ('guidepost', 'random_uniform')
+    if rule and args.checkpoint:
+        parser.error('Rule policies do not load network weights')
+    actor = None if rule else CapabilityConditionedActor()
     if args.checkpoint:
         checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
         if checkpoint.get('format') != 'marvel-heterogeneous-v1':
             raise ValueError('Expected a V1 checkpoint')
         actor.load_state_dict(checkpoint['policy_model'])
-    weights = actor.state_dict()
+    weights = None if rule else actor.state_dict()
     selected = select_maps(args.maps, args.num_maps, args.seed)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     output = Path(args.output or f'v1_explore_{args.policy}_{args.recovery}_{stamp}.csv')
@@ -149,7 +154,7 @@ def main(argv=None):
                 ray.shutdown()
     ordered = [rows[i] for i in range(len(jobs))]
     summary = dict(summarize(ordered), policy=args.policy, recovery=args.recovery, seed=args.seed,
-                   random_actor=args.checkpoint is None, wall_seconds=time.perf_counter()-started)
+                   random_actor=not rule and args.checkpoint is None, wall_seconds=time.perf_counter()-started)
     output.with_suffix('.json').write_text(json.dumps(dict(summary=summary, manifest=manifest,
                                                           rows=ordered, failures=failures), indent=2))
     print('V1_EXPLORE_SUMMARY ' + json.dumps(summary), flush=True)

@@ -71,11 +71,15 @@ class V1Runner(Runner):
     """Keep Runner's weight/job protocol, with V1 networks and joint results."""
     def __init__(self, meta_agent_id, max_steps=MAX_EPISODE_STEP, record_joint=True,
                  greedy=False, map_directory='maps_medium', save_gif_every=0,
-                 gif_dir=None, gif_frame_every=1, stagnation_recovery=False, stagnation_recovery_episodes=0):
+                 gif_dir=None, gif_frame_every=1, stagnation_recovery=False, stagnation_recovery_episodes=0, diagnostic_policy=None):
         from utils.model import CapabilityConditionedActor
         self.meta_agent_id = meta_agent_id
         self.device = torch.device('cuda') if USE_GPU else torch.device('cpu')
-        self.network = CapabilityConditionedActor().to(self.device)
+        if diagnostic_policy not in (None, 'guidepost', 'random_uniform') or (diagnostic_policy and record_joint):
+            raise ValueError('Rule policies are only available for diagnostic evaluation')
+        from utils.v1_diagnostics import RulePolicy
+        self.diagnostic_policy = diagnostic_policy
+        self.network = (RulePolicy() if diagnostic_policy else CapabilityConditionedActor()).to(self.device)
         self.max_steps = max_steps
         self.record_joint = record_joint
         self.greedy = greedy
@@ -92,7 +96,8 @@ class V1Runner(Runner):
 
     def job(self, weights_set, episode_number, map_path=None):
         from utils.v1_runtime import episode_error_info
-        self.set_policy_net_weights(weights_set[0])
+        if self.diagnostic_policy is None:
+            self.set_policy_net_weights(weights_set[0])
         try:
             transitions, metrics = self.do_job(episode_number, map_path=map_path)
         except Exception as error:
@@ -107,6 +112,7 @@ class V1Runner(Runner):
         worker = V1Worker(self.meta_agent_id, self.network, episode_number, device=self.device,
                           max_steps=self.max_steps, record_joint=self.record_joint,
                           greedy=self.greedy, map_directory=self.map_directory, map_path=map_path,
+                          diagnostic_policy=self.diagnostic_policy,
                           gif_dir=self.gif_dir if save_gif else None, gif_frame_every=self.gif_frame_every,
                           stagnation_recovery=(self.stagnation_recovery or
                                                episode_number < self.stagnation_recovery_episodes))
