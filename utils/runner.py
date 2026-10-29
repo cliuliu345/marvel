@@ -112,7 +112,11 @@ class V1Runner(Runner):
 
 @ray.remote(num_cpus=1, num_gpus=gpu)
 class V1RLRunner(V1Runner):
-    pass
+    def __init__(self, *args, **kwargs):
+        import os
+        os.environ['OMP_NUM_THREADS'] = '1'
+        torch.set_num_threads(1)
+        super().__init__(*args, **kwargs)
 
 
 if __name__ == '__main__':

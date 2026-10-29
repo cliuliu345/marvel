@@ -31,7 +31,7 @@ def build_parser():
     parser.add_argument('--episodes', type=int, default=1)
     parser.add_argument('--start-episode', type=int, default=0)
     parser.add_argument('--max-steps', type=int, default=MAX_EPISODE_STEP)
-    parser.add_argument('--joint-batch-size', type=int, default=1)
+    parser.add_argument('--joint-batch-size', type=int, default=64)
     parser.add_argument('--updates-per-episode', type=int, default=4)
     parser.add_argument('--warmup-agent-samples', type=int, default=MINIMUM_BUFFER_SIZE,
                         help='Agent samples required before updates; four per joint transition (default: 2000)')

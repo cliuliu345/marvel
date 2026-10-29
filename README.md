@@ -63,3 +63,46 @@ Shizhe Zhang,
 
 License:
 MIT
+
+
+## V1 heterogeneous training
+
+The V1 entry point keeps the legacy training path unchanged. On a single
+64 GB / RTX 3090 / 8-core host, use six single-threaded sampling workers and
+a GPU learner. The default joint batch is 64 (256 agent samples); warm-up
+remains 2,000 agent samples (500 joint transitions). Keep each run in its
+own output directory.
+
+```bash
+python driver_v1.py --episodes 20000 --ray-workers 6 --device cuda \
+    --checkpoint-out model/v1_run1/latest.pth --checkpoint-every 100 \
+    --tensorboard-logdir train/v1_run1
+```
+
+Resume the learner, optimizers, update counter and next episode number:
+
+```bash
+python driver_v1.py --resume model/v1_run1/latest.pth --episodes 20000 \
+    --ray-workers 6 --device cuda --checkpoint-out model/v1_run1/latest.pth \
+    --checkpoint-every 100 --tensorboard-logdir train/v1_run1
+```
+
+Replay is not persisted and must warm up again. `--episodes` counts new
+attempts, including failed episodes. In asynchronous sampling, `next_episode`
+is the next *unlaunched* ID; in-flight episodes abandoned at shutdown are not
+retried. Checkpoints are enabled by `--checkpoint-out`; atomic `latest.pth`
+is saved at shutdown and every configured interval, alongside `ep{episode}.pth`.
+Individual episode failures are logged as `V1_EPISODE_ERROR`; the default
+consecutive-failure limit is five. Learner numerical errors remain fatal.
+Reproduce an environment with `--episodes 1 --start-episode E --local-worker-id W`
+using the same map directory and model. Shared Replay tensors are read-only.
+
+```bash
+python -m pytest tests -q
+python driver_v1.py --smoke
+```
+
+Smoke always uses one joint sample, CPU, two macro steps and one SAC update.
+Optional `--stagnation-recovery` enables behavior recovery; pure Actor behavior
+is the default. Existing network, reward, SAC, 128-step and 99% success
+semantics are unchanged.
