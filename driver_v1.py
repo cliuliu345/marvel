@@ -25,8 +25,18 @@ from utils.v1_runtime import episode_error_info, atomic_checkpoint
 from utils.v1_tensorboard import tensorboard_writer, write_episode, write_update
 
 
+class V1ArgumentParser(argparse.ArgumentParser):
+    def parse_args(self, *args, **kwargs):
+        parsed = super().parse_args(*args, **kwargs)
+        # None distinguishes an omitted cutoff from an explicitly supplied 0
+        # while argparse enforces the mutually exclusive group.
+        if parsed.stagnation_recovery_episodes is None:
+            parsed.stagnation_recovery_episodes = 0
+        return parsed
+
+
 def build_parser():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = V1ArgumentParser(description=__doc__)
     parser.add_argument('--smoke', action='store_true', help='CPU, episode 7, two macro steps, one actual SAC update')
     parser.add_argument('--episodes', type=int, default=1)
     parser.add_argument('--start-episode', type=int, default=0)
@@ -55,8 +65,11 @@ def build_parser():
                         help='GIF root; enabled runs create a unique subdirectory')
     parser.add_argument('--gif-frame-every', type=int, default=1,
                         help='Capture every N macro steps, plus the initial and final states')
-    parser.add_argument('--stagnation-recovery', action='store_true',
+    recovery = parser.add_mutually_exclusive_group()
+    recovery.add_argument('--stagnation-recovery', action='store_true',
                         help='Opt-in Belief-only recovery of no-information two-step cycles')
+    recovery.add_argument('--stagnation-recovery-episodes', type=int, default=None,
+                        help='Enable recovery only for episode IDs below N; training only')
     parser.add_argument('--evaluate', action='store_true')
     return parser
 
@@ -83,6 +96,10 @@ def _run(args, writer):
         raise ValueError('Warm-up agent sample count must be nonnegative')
     if args.save_gif_every < 0 or args.gif_frame_every < 1:
         raise ValueError('GIF episode interval must be nonnegative and frame interval must be positive')
+    if args.stagnation_recovery_episodes < 0:
+        raise ValueError('Recovery episode cutoff must be nonnegative')
+    if args.stagnation_recovery and args.stagnation_recovery_episodes:
+        raise ValueError('Use either full-run recovery or an episode cutoff, not both')
     if args.checkpoint_every < 0:
         raise ValueError('Checkpoint interval must be nonnegative')
     if args.resume and (args.checkpoint or args.evaluate or args.smoke):
@@ -116,7 +133,8 @@ def _run(args, writer):
     map_directory = args.map_directory or ('maps_test' if args.evaluate else 'maps_medium')
     runner_options = dict(max_steps=args.max_steps, record_joint=not args.evaluate,
                           greedy=args.evaluate, map_directory=map_directory,
-                          stagnation_recovery=args.stagnation_recovery)
+                          stagnation_recovery=args.stagnation_recovery,
+                          stagnation_recovery_episodes=0 if args.evaluate else args.stagnation_recovery_episodes)
     if args.save_gif_every:
         root = Path(args.gif_dir).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)

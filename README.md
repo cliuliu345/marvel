@@ -103,6 +103,9 @@ python driver_v1.py --smoke
 ```
 
 Smoke always uses one joint sample, CPU, two macro steps and one SAC update.
-Optional `--stagnation-recovery` enables behavior recovery; pure Actor behavior
-is the default. Existing network, reward, SAC, 128-step and 99% success
+Optional `--stagnation-recovery` enables behavior recovery for the whole run.
+Alternatively, `--stagnation-recovery-episodes N` enables it only for training
+episode IDs below N; the two options are mutually exclusive. Evaluation ignores
+the training cutoff and needs explicit `--stagnation-recovery` to enable it.
+Pure Actor behavior is the default. Existing network, reward, SAC, 128-step and 99% success
 semantics are unchanged.

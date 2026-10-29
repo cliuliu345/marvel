@@ -71,7 +71,7 @@ class V1Runner(Runner):
     """Keep Runner's weight/job protocol, with V1 networks and joint results."""
     def __init__(self, meta_agent_id, max_steps=MAX_EPISODE_STEP, record_joint=True,
                  greedy=False, map_directory='maps_medium', save_gif_every=0,
-                 gif_dir=None, gif_frame_every=1, stagnation_recovery=False):
+                 gif_dir=None, gif_frame_every=1, stagnation_recovery=False, stagnation_recovery_episodes=0):
         from utils.model import CapabilityConditionedActor
         self.meta_agent_id = meta_agent_id
         self.device = torch.device('cuda') if USE_GPU else torch.device('cpu')
@@ -85,7 +85,10 @@ class V1Runner(Runner):
         self.save_gif_every = save_gif_every
         self.gif_dir = gif_dir
         self.gif_frame_every = gif_frame_every
+        if stagnation_recovery_episodes < 0 or (stagnation_recovery and stagnation_recovery_episodes):
+            raise ValueError('Choose full-run recovery or a nonnegative episode cutoff')
         self.stagnation_recovery = stagnation_recovery
+        self.stagnation_recovery_episodes = stagnation_recovery_episodes
 
     def job(self, weights_set, episode_number):
         from utils.v1_runtime import episode_error_info
@@ -105,7 +108,8 @@ class V1Runner(Runner):
                           max_steps=self.max_steps, record_joint=self.record_joint,
                           greedy=self.greedy, map_directory=self.map_directory,
                           gif_dir=self.gif_dir if save_gif else None, gif_frame_every=self.gif_frame_every,
-                          stagnation_recovery=self.stagnation_recovery)
+                          stagnation_recovery=(self.stagnation_recovery or
+                                               episode_number < self.stagnation_recovery_episodes))
         worker.run_episode()
         return worker.joint_transitions, worker.perf_metrics
 
