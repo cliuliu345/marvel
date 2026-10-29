@@ -50,6 +50,8 @@ def build_parser():
                         help='GIF root; enabled runs create a unique subdirectory')
     parser.add_argument('--gif-frame-every', type=int, default=1,
                         help='Capture every N macro steps, plus the initial and final states')
+    parser.add_argument('--stagnation-recovery', action='store_true',
+                        help='Opt-in Belief-only recovery of no-information two-step cycles')
     parser.add_argument('--evaluate', action='store_true')
     return parser
 
@@ -93,7 +95,8 @@ def _run(args, writer):
     updates, episode_metrics = [], []
     map_directory = args.map_directory or ('maps_test' if args.evaluate else 'maps_medium')
     runner_options = dict(max_steps=args.max_steps, record_joint=not args.evaluate,
-                          greedy=args.evaluate, map_directory=map_directory)
+                          greedy=args.evaluate, map_directory=map_directory,
+                          stagnation_recovery=args.stagnation_recovery)
     if args.save_gif_every:
         root = Path(args.gif_dir).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)

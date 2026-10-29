@@ -4,7 +4,7 @@ import time
 import numpy as np
 import torch
 
-from parameter import MAX_EPISODE_STEP, NUM_ANGLES_BIN
+from parameter import MAX_EPISODE_STEP, NUM_ANGLES_BIN, UNKNOWN
 from utils.critic_observation import JointActionContext
 from utils.motion_model import compute_allowable_heading
 from utils.multi_agent_worker import MultiAgentWorker
@@ -15,7 +15,8 @@ from utils.v1_rewards import FrontierRewardSnapshot, episode_flags
 
 class V1Worker(MultiAgentWorker):
     def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', max_steps=MAX_EPISODE_STEP,
-                 record_joint=True, greedy=False, map_directory='maps_medium', gif_dir=None, gif_frame_every=1):
+                 record_joint=True, greedy=False, map_directory='maps_medium', gif_dir=None, gif_frame_every=1,
+                 stagnation_recovery=False):
         if not getattr(policy_net, 'uses_v1_actor_observation', False):
             raise TypeError('V1Worker requires the capability-conditioned Actor')
         if not 1 <= max_steps <= MAX_EPISODE_STEP:
@@ -29,6 +30,14 @@ class V1Worker(MultiAgentWorker):
         self.episode_returns = np.zeros(len(self.robot_list), dtype=float)
         self.max_belief_nodes = self.max_gt_nodes = 0
         self.min_valid_actions = None
+        self.completed_steps = 0
+        self.recovery = None
+        if stagnation_recovery:
+            from utils.v1_recovery import StagnationRecovery
+            def emit(record):
+                print('V1_RECOVERY ' + json.dumps(dict(episode=self.global_step,
+                      worker_id=self.meta_agent_id, **record)), flush=True)
+            self.recovery = StagnationRecovery(self.env.robot_belief, self.env.robot_locations, emit)
         # Keep legacy plot flags off: V1 owns read-only macro-step visualization.
         self.gif_recorder = None
         if gif_dir is not None:
@@ -50,6 +59,9 @@ class V1Worker(MultiAgentWorker):
         observations = tuple(robot.get_actor_observation(allow_no_actions=terminal) for robot in self.robot_list)
         slots = None if terminal else [robot.select_next_waypoint(obs, greedy=self.greedy)[2].item()
                                       for robot, obs in zip(self.robot_list, observations)]
+        if self.recovery is not None and not terminal:
+            slots = self.recovery.select(self.robot_list, observations, slots, self.completed_steps + 1,
+                                         bootstrap_only=self.completed_steps >= self.max_steps)
         context = JointActionContext.from_actor_observations(
             observations, slots, [robot.id for robot in self.robot_list],
             np.array([robot.location for robot in self.robot_list]),
@@ -83,6 +95,9 @@ class V1Worker(MultiAgentWorker):
         return goals
 
     def execute_motion(self, state, goals):
+        if self.recovery is not None:
+            self.recovery.record_execution(state.context, goals)
+            self.agent_new_belief_cells = np.zeros(len(self.robot_list), dtype=int)
         positions, headings, finals = [], [], []
         for row, (robot, goal) in enumerate(zip(self.robot_list, goals)):
             slot = int(state.context.action_slots[row])
@@ -97,7 +112,14 @@ class V1Worker(MultiAgentWorker):
             robot.update_heading(final)
         for substep in range(self.sim_steps):
             for row, robot in enumerate(self.robot_list):
+                if self.recovery is not None:
+                    unknown_before = self.env.robot_belief == UNKNOWN
                 self.env.update_robot_belief(positions[row][substep], headings[row][substep], agent_id=robot.id)
+                if self.recovery is not None:
+                    # Read-only attribution in the existing sequential scan order;
+                    # no extra scan and no Ground Truth input to recovery.
+                    self.agent_new_belief_cells[robot.id] += int(np.count_nonzero(
+                        unknown_before & (self.env.robot_belief != UNKNOWN)))
         for robot, goal in zip(self.robot_list, goals):
             self.env.final_sim_step(goal, robot.id)
         return np.asarray(finals)
@@ -130,6 +152,10 @@ class V1Worker(MultiAgentWorker):
                 robot.update_planning_state(self.env.robot_locations)
             self.env.evaluate_exploration_rate()
             completed_steps = step + 1
+            self.completed_steps = completed_steps
+            if self.recovery is not None:
+                self.recovery.observe(self.env.robot_belief, self.env.robot_locations, completed_steps,
+                                      self.agent_new_belief_cells)
             terminated, truncated = episode_flags(self.env.explored_rate, completed_steps, self.max_steps)
             self.env.done = terminated
             rewards, components = reward_snapshot.finish_rewards(individual, self.node_manager.global_frontiers, terminated)
@@ -162,3 +188,8 @@ class V1Worker(MultiAgentWorker):
                                  max_belief_nodes=self.max_belief_nodes, max_gt_nodes=self.max_gt_nodes,
                                  min_valid_actions=self.min_valid_actions, frontier_version=self.node_manager.frontier_version,
                                  map_path=self.env.map_path, episode_seconds=time.perf_counter() - started)
+
+        self.perf_metrics['behavior_policy'] = ('Actor + Stagnation Recovery' if self.recovery is not None
+                                                else 'Actor')
+        if self.recovery is not None:
+            self.perf_metrics.update(self.recovery.metrics())
