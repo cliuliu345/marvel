@@ -14,12 +14,13 @@ from utils.utils import get_cell_position_from_coords, make_gif
 
 
 class V1EpisodeGif:
-    def __init__(self, root, episode, worker_id, frame_every=1):
+    def __init__(self, root, episode, worker_id, frame_every=1, filename_prefix=''):
         if frame_every < 1:
             raise ValueError('GIF frame interval must be positive')
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         self.directory = Path(tempfile.mkdtemp(prefix=f'episode_{episode:06d}_worker_{worker_id}_', dir=root))
+        self.filename_prefix = filename_prefix
         self.episode = episode
         self.worker_id = worker_id
         self.frame_every = frame_every
@@ -106,7 +107,7 @@ class V1EpisodeGif:
 
     def finish(self, worker):
         started = time.perf_counter()
-        output = make_gif(str(self.directory), f'episode_{self.episode:06d}_worker_{self.worker_id}',
+        output = make_gif(str(self.directory), f'{self.filename_prefix}episode_{self.episode:06d}_worker_{self.worker_id}',
                           self.frame_files, worker.env.explored_rate, frame_duration=0.5)
         result = dict(episode=self.episode, worker_id=self.worker_id, map_path=worker.env.map_path,
                       gif_path=output, frame_count=len(self.frame_files), frame_every=self.frame_every,

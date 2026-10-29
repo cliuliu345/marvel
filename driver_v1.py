@@ -22,7 +22,7 @@ from utils.runner import V1Runner, V1RLRunner
 from utils.v1_replay import JointReplayBuffer, collate_transitions, replay_unique_bytes, process_rss_bytes
 from utils.v1_sac import V1SACLearner
 from utils.v1_runtime import episode_error_info, atomic_checkpoint
-from utils.v1_tensorboard import tensorboard_writer, write_episode, write_update
+from utils.v1_tensorboard import tensorboard_writer, write_episode, write_update, write_evaluation
 
 
 class V1ArgumentParser(argparse.ArgumentParser):
@@ -70,6 +70,10 @@ def build_parser():
                         help='Opt-in Belief-only recovery of no-information two-step cycles')
     recovery.add_argument('--stagnation-recovery-episodes', type=int, default=None,
                         help='Enable recovery only for episode IDs below N; training only')
+    parser.add_argument('--eval-every', type=int, default=0)
+    parser.add_argument('--eval-maps', default='maps_test')
+    parser.add_argument('--eval-num-maps', type=int, default=20)
+    parser.add_argument('--eval-seed', type=int, default=0)
     parser.add_argument('--evaluate', action='store_true')
     return parser
 
@@ -106,6 +110,10 @@ def _run(args, writer):
         raise ValueError('--resume cannot be combined with --checkpoint, --evaluate or --smoke')
     if args.evaluate and not args.checkpoint:
         raise ValueError('Evaluation requires a V1 checkpoint')
+    if args.eval_every < 0 or args.eval_num_maps < 1 or args.eval_seed < 0:
+        raise ValueError('Invalid independent evaluation configuration')
+    if args.evaluate and args.eval_every:
+        raise ValueError('Periodic evaluation is only available during training')
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -135,13 +143,17 @@ def _run(args, writer):
                           greedy=args.evaluate, map_directory=map_directory,
                           stagnation_recovery=args.stagnation_recovery,
                           stagnation_recovery_episodes=0 if args.evaluate else args.stagnation_recovery_episodes)
-    if args.save_gif_every:
+    run_dir = None
+    if args.save_gif_every or args.eval_every:
         root = Path(args.gif_dir).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S_%fZ')
         run_dir = tempfile.mkdtemp(prefix=f'run_{stamp}_seed{args.seed}_', dir=root)
-        runner_options.update(save_gif_every=args.save_gif_every, gif_dir=run_dir,
-                              gif_frame_every=args.gif_frame_every)
+        if args.save_gif_every:
+            runner_options.update(save_gif_every=args.save_gif_every, gif_dir=run_dir,
+                                  gif_frame_every=args.gif_frame_every)
+    from utils.v1_evaluation import fixed_evaluation_maps, isolated_rng, evaluation_summary
+    eval_maps = fixed_evaluation_maps(args.eval_maps, args.eval_num_maps, args.eval_seed) if args.eval_every else []
 
     def weights():
         return [{name: value.detach().cpu().clone() for name, value in actor.state_dict().items()}]
@@ -217,6 +229,63 @@ def _run(args, writer):
         write_episode(writer, episode_record)
         periodic_save(info['episode_number'])
 
+    def evaluate_round(runners, ray_module=None):
+        if not args.eval_every or processed_episodes % args.eval_every:
+            return
+        before = (processed_episodes, next_episode, consecutive_failures, failed_episodes, len(replay), learner.updates)
+        with isolated_rng(replay.rng):
+            evaluation_weights = weights()
+            metrics, errors = [], []
+            rows = {}
+            def record(index, result):
+                transitions, metric, info = result
+                if transitions:
+                    raise RuntimeError('Independent evaluation returned Replay data')
+                if info.get('error'):
+                    errors.append(info)
+                    print('V1_EVAL_ERROR ' + json.dumps(dict(info, training_episodes=processed_episodes)), flush=True)
+                else:
+                    metrics.append(metric)
+                rows[index] = dict(map_path=eval_maps[index], metrics=metric, info=info)
+            if ray_module is None:
+                for index, path in enumerate(eval_maps):
+                    record(index, runners.evaluate(evaluation_weights, index, path, args.eval_seed,
+                                                    run_dir if index == 0 else None, processed_episodes))
+            else:
+                pending_eval, launched_eval = {}, 0
+                def launch(worker_id, index):
+                    ref = runners[worker_id].evaluate.remote(evaluation_weights, index, eval_maps[index],
+                        args.eval_seed, run_dir if index == 0 else None, processed_episodes)
+                    pending_eval[ref] = (worker_id, index)
+                for worker_id in runners:
+                    if launched_eval < len(eval_maps):
+                        launch(worker_id, launched_eval)
+                        launched_eval += 1
+                while pending_eval:
+                    ready, _ = ray_module.wait(list(pending_eval), num_returns=1)
+                    for ref in ready:
+                        worker_id, index = pending_eval.pop(ref)
+                        try:
+                            result = ray_module.get(ref)
+                        except ray_module.exceptions.RayError as error:
+                            result = ([], {}, episode_error_info(error, 100000 + index, index,
+                                                                args.eval_maps, map_path=eval_maps[index]))
+                            if isinstance(error, (ray_module.exceptions.RayActorError,
+                                                  ray_module.exceptions.WorkerCrashedError)):
+                                ray_module.kill(runners[worker_id])
+                                runners[worker_id] = V1RLRunner.remote(worker_id, **runner_options)
+                        record(index, result)
+                        if launched_eval < len(eval_maps):
+                            launch(worker_id, launched_eval)
+                            launched_eval += 1
+            summary = evaluation_summary(metrics, errors, processed_episodes, learner.updates)
+            summary['map_results'] = [rows[i] for i in range(len(eval_maps))]
+            print('V1_EVAL ' + json.dumps(summary), flush=True)
+            write_evaluation(writer, summary)
+        after = (processed_episodes, next_episode, consecutive_failures, failed_episodes, len(replay), learner.updates)
+        if before != after:
+            raise RuntimeError('Independent evaluation changed training counters or Replay')
+
     try:
         if args.ray_workers:
             import ray
@@ -242,6 +311,7 @@ def _run(args, writer):
                             ray.kill(runners[worker_id])
                             runners[worker_id] = V1RLRunner.remote(worker_id, **runner_options)
                         consume(result)
+                        evaluate_round(runners, ray)
                         if launched < args.episodes:
                             episode = args.start_episode + launched
                             next_episode = episode + 1
@@ -256,6 +326,7 @@ def _run(args, writer):
             for episode in range(args.start_episode, args.start_episode + args.episodes):
                 next_episode = episode + 1
                 consume(runner.job(weights(), episode))
+                evaluate_round(runner)
     finally:
         # Includes normal completion, KeyboardInterrupt, episode failure limit,
         # Ray failures, and fatal learner errors. Replay is intentionally absent.

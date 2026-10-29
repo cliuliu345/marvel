@@ -71,7 +71,7 @@ class V1Runner(Runner):
     """Keep Runner's weight/job protocol, with V1 networks and joint results."""
     def __init__(self, meta_agent_id, max_steps=MAX_EPISODE_STEP, record_joint=True,
                  greedy=False, map_directory='maps_medium', save_gif_every=0,
-                 gif_dir=None, gif_frame_every=1, stagnation_recovery=False, stagnation_recovery_episodes=0, diagnostic_policy=None):
+                 gif_dir=None, gif_frame_every=1, stagnation_recovery=False, stagnation_recovery_episodes=0, diagnostic_policy=None, gif_prefix=''):
         from utils.model import CapabilityConditionedActor
         self.meta_agent_id = meta_agent_id
         self.device = torch.device('cuda') if USE_GPU else torch.device('cpu')
@@ -88,6 +88,7 @@ class V1Runner(Runner):
             raise ValueError('GIF recording requires valid intervals and an output directory')
         self.save_gif_every = save_gif_every
         self.gif_dir = gif_dir
+        self.gif_prefix = gif_prefix
         self.gif_frame_every = gif_frame_every
         if stagnation_recovery_episodes < 0 or (stagnation_recovery and stagnation_recovery_episodes):
             raise ValueError('Choose full-run recovery or a nonnegative episode cutoff')
@@ -114,10 +115,28 @@ class V1Runner(Runner):
                           greedy=self.greedy, map_directory=self.map_directory, map_path=map_path,
                           diagnostic_policy=self.diagnostic_policy,
                           gif_dir=self.gif_dir if save_gif else None, gif_frame_every=self.gif_frame_every,
+                          gif_prefix=self.gif_prefix,
                           stagnation_recovery=(self.stagnation_recovery or
                                                episode_number < self.stagnation_recovery_episodes))
         worker.run_episode()
         return worker.joint_transitions, worker.perf_metrics
+
+
+    def evaluate(self, weights_set, index, map_path, seed=0, gif_dir=None, training_episodes=0):
+        from utils.v1_evaluation import isolated_rng
+        from utils.v1_runtime import episode_error_info
+        # A temporary evaluation runner cannot alter this runner's configuration
+        # or weights. Its initialization and rendering cannot consume training RNG.
+        with isolated_rng(seed=seed):
+            try:
+                runner = V1Runner(100000 + index, max_steps=self.max_steps, record_joint=False,
+                                  greedy=True, map_directory=self.map_directory,
+                                  save_gif_every=1 if gif_dir is not None else 0, gif_dir=gif_dir,
+                                  gif_prefix=f'eval_train{training_episodes:06d}_')
+                return runner.job(weights_set, index, map_path=map_path)
+            except Exception as error:
+                return [], {}, episode_error_info(error, 100000 + index, index,
+                                                  self.map_directory, map_path=map_path)
 
 
 @ray.remote(num_cpus=1, num_gpus=gpu)

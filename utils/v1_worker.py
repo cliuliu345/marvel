@@ -16,7 +16,7 @@ from utils.v1_rewards import FrontierRewardSnapshot, episode_flags
 class V1Worker(MultiAgentWorker):
     def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', max_steps=MAX_EPISODE_STEP,
                  record_joint=True, greedy=False, map_directory='maps_medium', gif_dir=None, gif_frame_every=1,
-                 stagnation_recovery=False, map_path=None, diagnostic_policy=None):
+                 stagnation_recovery=False, map_path=None, diagnostic_policy=None, gif_prefix=''):
         if not getattr(policy_net, 'uses_v1_actor_observation', False):
             raise TypeError('V1Worker requires the capability-conditioned Actor')
         if not 1 <= max_steps <= MAX_EPISODE_STEP:
@@ -47,7 +47,7 @@ class V1Worker(MultiAgentWorker):
         self.gif_recorder = None
         if gif_dir is not None:
             from utils.v1_gif import V1EpisodeGif
-            self.gif_recorder = V1EpisodeGif(gif_dir, global_step, meta_agent_id, gif_frame_every)
+            self.gif_recorder = V1EpisodeGif(gif_dir, global_step, meta_agent_id, gif_frame_every, filename_prefix=gif_prefix)
 
     def _write_gif(self, method, *args, **kwargs):
         try:

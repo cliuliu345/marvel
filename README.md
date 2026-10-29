@@ -109,3 +109,21 @@ episode IDs below N; the two options are mutually exclusive. Evaluation ignores
 the training cutoff and needs explicit `--stagnation-recovery` to enable it.
 Pure Actor behavior is the default. Existing network, reward, SAC, 128-step and 99% success
 semantics are unchanged.
+
+### Independent V1 evaluation
+
+Use `--eval-every 100 --eval-maps maps_test --eval-num-maps 20 --eval-seed 0`
+to evaluate a fixed sorted-and-seeded subset with the current Actor, greedy
+selection, recovery off and no Replay collection. Evaluation map k always uses
+worker ID 100000+k and episode k. Evaluation runs on the existing Ray runner
+pool between training work; one evaluation round finishes before another starts.
+It never advances training episode IDs, processed/failure counts, Replay or SAC.
+CPU/CUDA Torch, NumPy, Python and Replay RNG states are saved and restored.
+Ray asynchronous scheduling itself does not guarantee bitwise reproducibility;
+use `--ray-workers 0 --device cpu` for bitwise training reproduction. Timing and
+RSS measurements are not deterministic trajectory values.
+
+`V1_EVAL` and `V1/Eval/*` use processed training episode count as their axis.
+The first fixed evaluation map produces a GIF each round under the run's unique
+GIF directory, with `eval_trainNNNNNN_` in its filename. Per-map results and errors
+are retained in the JSON log; evaluation errors do not count as training failures.

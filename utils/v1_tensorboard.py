@@ -60,6 +60,16 @@ def write_episode(writer, record):
     writer.flush()
 
 
+def write_evaluation(writer, record):
+    if writer is None:
+        return
+    for field in ('success_rate', 'explored_rate', 'mean_steps', 'success_mean_steps',
+                  'guidepost_agreement', 'top1_heading_rate', 'error_count', 'optimizer_updates'):
+        if record.get(field) is not None:
+            writer.add_scalar('V1/Eval/' + field, record[field], global_step=record['training_episodes'])
+    writer.flush()
+
+
 def import_json_log(path, logdir):
     """Read V1_UPDATE/V1_EPISODE lines; never infer missing rewards or step IDs."""
     path, logdir = Path(path), Path(logdir)
