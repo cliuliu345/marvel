@@ -127,3 +127,23 @@ RSS measurements are not deterministic trajectory values.
 The first fixed evaluation map produces a GIF each round under the run's unique
 GIF directory, with `eval_trainNNNNNN_` in its filename. Per-map results and errors
 are retained in the JSON log; evaluation errors do not count as training failures.
+
+### V1 GIFs and final snapshots
+
+`--save-gif-every 64 --gif-dir gifs/v1_run1` matches MARVEL's
+`SAVE_IMG_GAP=64` episode interval; GIF recording remains off by default.
+Each invocation creates a unique run directory:
+`gifs/v1_run1/run_<UTC timestamp>_seed<seed>_<unique>/`.
+Each selected episode keeps its own `episode_<id>_worker_<id>_<unique>/`
+subdirectory with the GIF, `frames.json`, and final `frame_NNNN.png`.
+`make_gif` deletes intermediate PNGs but explicitly retains the final PNG.
+After successful encoding, both the GIF and final snapshot are also copied to
+`<unique run directory>/summary/ep000064_w0_cov99.12.gif` and the matching `.png`.
+The `cov` value is coverage in percent. Original episode directories are retained.
+Evaluation copies have an additional `eval_trainNNNNNN_` prefix so rounds on the
+same fixed map cannot overwrite each other.
+
+By default V1 renders one frame per macro step, plus the initial frame; MARVEL
+renders each of its six simulation substeps (six frames per macro step).
+`--gif-frame-every N` can subsample V1 macro steps; the final frame is always saved.
+This rendering difference does not alter scans, actions, rewards or training.

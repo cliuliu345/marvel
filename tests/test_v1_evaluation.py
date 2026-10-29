@@ -86,7 +86,7 @@ def test_three_real_updates_are_bitwise_equal_with_evaluation(tmp_path, capsys):
     assert [e['training_episodes'] for e in evaluations] == [1,2,3]
     assert [e['optimizer_updates'] for e in evaluations] == [1,2,3]
     assert all(e['error_count'] == 0 for e in evaluations)
-    assert len(list((tmp_path/'1/gifs').rglob('eval_train*.gif'))) == 3
+    assert len([p for p in (tmp_path/'1/gifs').rglob('eval_train*.gif') if p.parent.name != 'summary']) == 3
 
 
 def test_ray_evaluation_failures_do_not_advance_training_ids(monkeypatch, tmp_path, capsys):

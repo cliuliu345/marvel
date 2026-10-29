@@ -1,5 +1,6 @@
 """Read-only, opt-in macro-step visualization; no observations or scans are built here."""
 import json
+import shutil
 from pathlib import Path
 import tempfile
 import time
@@ -109,7 +110,17 @@ class V1EpisodeGif:
         started = time.perf_counter()
         output = make_gif(str(self.directory), f'{self.filename_prefix}episode_{self.episode:06d}_worker_{self.worker_id}',
                           self.frame_files, worker.env.explored_rate, frame_duration=0.5)
+        # make_gif removes only frame_files[:-1]; retain and publish the final PNG.
+        final_frame = Path(self.frame_files[-1])
+        summary = self.directory.parent / 'summary'
+        summary.mkdir(exist_ok=True)
+        stem = (f'{self.filename_prefix}ep{self.episode:06d}_w{self.worker_id}_'
+                f'cov{100 * worker.env.explored_rate:.2f}')
+        summary_gif, summary_png = summary / (stem + '.gif'), summary / (stem + '.png')
+        shutil.copy2(output, summary_gif)
+        shutil.copy2(final_frame, summary_png)
         result = dict(episode=self.episode, worker_id=self.worker_id, map_path=worker.env.map_path,
+                      final_frame_path=str(final_frame), summary_gif=str(summary_gif), summary_png=str(summary_png),
                       gif_path=output, frame_count=len(self.frame_files), frame_every=self.frame_every,
                       render_seconds=self.render_seconds, encode_seconds=time.perf_counter() - started,
                       gif_bytes=Path(output).stat().st_size, frames=self.frames)
