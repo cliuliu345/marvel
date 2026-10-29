@@ -30,6 +30,7 @@ class V1Worker(MultiAgentWorker):
         self.episode_returns = np.zeros(len(self.robot_list), dtype=float)
         self.max_belief_nodes = self.max_gt_nodes = 0
         self.min_valid_actions = None
+        self.perf_metrics.update(conflict_replacements=0, conflict_nonadjacent=0, conflict_stay=0)
         self.completed_steps = 0
         self.recovery = None
         if stagnation_recovery:
@@ -89,6 +90,14 @@ class V1Worker(MultiAgentWorker):
                     if tuple(entry.data.coords) not in occupied:
                         ordered[row] = entry.data.coords
                         goals[sequence[row]] = entry.data.coords
+                        # Diagnostics only: retain MARVEL's nearest-25 decision.
+                        table = context.action_tables[int(sequence[row])]
+                        legal = table.node_coordinates[0, table.valid_mask[0]].cpu().numpy()
+                        self.perf_metrics['conflict_replacements'] += 1
+                        self.perf_metrics['conflict_nonadjacent'] += int(
+                            not np.any(np.all(legal == entry.data.coords, axis=1)))
+                        self.perf_metrics['conflict_stay'] += int(np.array_equal(
+                            entry.data.coords, context.current_coordinates[sequence[row]].cpu().numpy()))
                         break
                 else:
                     raise RuntimeError('No distinct execution goal available for conflict resolution')
