@@ -8,6 +8,7 @@ from pathlib import Path
 import random
 import sys
 import time
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
@@ -50,7 +51,8 @@ def summarize(rows):
                 error_count=len(rows)-len(valid), errors=errors, **aggregate_behavior(valid))
 
 
-def check_one(weights, directory, name, episode, worker_id, seed, policy, recovery):
+def check_one(weights, directory, name, episode, worker_id, seed, policy, recovery,
+              gif_dir=None, gif_frame_every=1, gif_frame_mode='substep', gif_frame_duration=None):
     os.environ['OMP_NUM_THREADS'] = '1'
     torch.set_num_threads(1)
     # Reproducible action RNG, independent of Ray task completion order.
@@ -62,6 +64,9 @@ def check_one(weights, directory, name, episode, worker_id, seed, policy, recove
     try:
         runner = V1Runner(worker_id, record_joint=False, greedy=policy == 'greedy',
                           map_directory=directory, stagnation_recovery=recovery == 'on',
+                          save_gif_every=1 if gif_dir is not None else 0, gif_dir=gif_dir,
+                          gif_frame_every=gif_frame_every, gif_frame_mode=gif_frame_mode,
+                          gif_frame_duration=gif_frame_duration,
                           diagnostic_policy=policy if policy in ('guidepost', 'random_uniform') else None)
         transitions, metrics, info = runner.job([weights], episode, map_path=os.path.join(directory, name))
         assert not transitions
@@ -89,8 +94,15 @@ def main(argv=None):
     parser.add_argument('--policy', choices=('sample', 'greedy', 'guidepost', 'random_uniform'), default='sample')
     parser.add_argument('--recovery', choices=('off', 'on'), default='off')
     parser.add_argument('--workers', type=int, default=6)
+    parser.add_argument('--gif-dir', help='Optional GIF root; creates a unique run directory')
+    parser.add_argument('--gif-frame-every', type=int, default=1)
+    parser.add_argument('--gif-frame-mode', choices=('substep', 'macro'), default='substep')
+    parser.add_argument('--gif-frame-duration', type=float, default=None)
     parser.add_argument('--output', help='New CSV path; refuses to overwrite an existing file')
     args = parser.parse_args(argv)
+    if args.gif_frame_every < 1 or (args.gif_frame_duration is not None and
+            (not np.isfinite(args.gif_frame_duration) or args.gif_frame_duration <= 0)):
+        parser.error('GIF interval and duration must be finite and positive')
     if args.workers < 1:
         parser.error('workers must be positive')
     torch.set_num_threads(1)
@@ -109,9 +121,14 @@ def main(argv=None):
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     output = Path(args.output or f'v1_explore_{args.policy}_{args.recovery}_{stamp}.csv')
     output.parent.mkdir(parents=True, exist_ok=True)
-    manifest = dict(vars(args), selected_maps=[dict(map_path=os.path.join(args.maps, name),
+    gif_run_dir = None
+    if args.gif_dir:
+        Path(args.gif_dir).mkdir(parents=True, exist_ok=True)
+        gif_run_dir = tempfile.mkdtemp(prefix=f'run_{stamp}_', dir=args.gif_dir)
+    manifest = dict(vars(args), gif_run_dir=gif_run_dir, selected_maps=[dict(map_path=os.path.join(args.maps, name),
                     episode=ep, worker_id=i % args.workers) for i, (name, ep) in enumerate(selected)])
-    jobs = [(weights, args.maps, name, ep, i % args.workers, args.seed, args.policy, args.recovery)
+    jobs = [(weights, args.maps, name, ep, i % args.workers, args.seed, args.policy, args.recovery,
+             gif_run_dir, args.gif_frame_every, args.gif_frame_mode, args.gif_frame_duration)
             for i, (name, ep) in enumerate(selected)]
     rows, failures = {}, []
     started = time.perf_counter()

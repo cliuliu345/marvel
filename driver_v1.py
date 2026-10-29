@@ -65,6 +65,9 @@ def build_parser():
                         help='GIF root; enabled runs create a unique subdirectory')
     parser.add_argument('--gif-frame-every', type=int, default=1,
                         help='Capture every N macro steps, plus the initial and final states')
+    parser.add_argument('--gif-frame-mode', choices=('substep', 'macro'), default='substep')
+    parser.add_argument('--gif-frame-duration', type=float, default=None,
+                        help='Seconds per frame; default 0.1 for substep and 0.5 for macro')
     recovery = parser.add_mutually_exclusive_group()
     recovery.add_argument('--stagnation-recovery', action='store_true',
                         help='Opt-in Belief-only recovery of no-information two-step cycles')
@@ -100,6 +103,8 @@ def _run(args, writer):
         raise ValueError('Warm-up agent sample count must be nonnegative')
     if args.save_gif_every < 0 or args.gif_frame_every < 1:
         raise ValueError('GIF episode interval must be nonnegative and frame interval must be positive')
+    if args.gif_frame_duration is not None and (not np.isfinite(args.gif_frame_duration) or args.gif_frame_duration <= 0):
+        raise ValueError('GIF frame duration must be finite and positive')
     if args.stagnation_recovery_episodes < 0:
         raise ValueError('Recovery episode cutoff must be nonnegative')
     if args.stagnation_recovery and args.stagnation_recovery_episodes:
@@ -141,6 +146,8 @@ def _run(args, writer):
     map_directory = args.map_directory or ('maps_test' if args.evaluate else 'maps_medium')
     runner_options = dict(max_steps=args.max_steps, record_joint=not args.evaluate,
                           greedy=args.evaluate, map_directory=map_directory,
+                          gif_frame_every=args.gif_frame_every, gif_frame_mode=args.gif_frame_mode,
+                          gif_frame_duration=args.gif_frame_duration,
                           stagnation_recovery=args.stagnation_recovery,
                           stagnation_recovery_episodes=0 if args.evaluate else args.stagnation_recovery_episodes)
     run_dir = None
@@ -150,8 +157,7 @@ def _run(args, writer):
         stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S_%fZ')
         run_dir = tempfile.mkdtemp(prefix=f'run_{stamp}_seed{args.seed}_', dir=root)
         if args.save_gif_every:
-            runner_options.update(save_gif_every=args.save_gif_every, gif_dir=run_dir,
-                                  gif_frame_every=args.gif_frame_every)
+            runner_options.update(save_gif_every=args.save_gif_every, gif_dir=run_dir)
     from utils.v1_evaluation import fixed_evaluation_maps, isolated_rng, evaluation_summary
     eval_maps = fixed_evaluation_maps(args.eval_maps, args.eval_num_maps, args.eval_seed) if args.eval_every else []
 

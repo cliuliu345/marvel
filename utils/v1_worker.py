@@ -16,7 +16,8 @@ from utils.v1_rewards import FrontierRewardSnapshot, episode_flags
 class V1Worker(MultiAgentWorker):
     def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', max_steps=MAX_EPISODE_STEP,
                  record_joint=True, greedy=False, map_directory='maps_medium', gif_dir=None, gif_frame_every=1,
-                 stagnation_recovery=False, map_path=None, diagnostic_policy=None, gif_prefix=''):
+                 stagnation_recovery=False, map_path=None, diagnostic_policy=None, gif_prefix='',
+                 gif_frame_mode='substep', gif_frame_duration=None):
         if not getattr(policy_net, 'uses_v1_actor_observation', False):
             raise TypeError('V1Worker requires the capability-conditioned Actor')
         if not 1 <= max_steps <= MAX_EPISODE_STEP:
@@ -43,11 +44,13 @@ class V1Worker(MultiAgentWorker):
                 print('V1_RECOVERY ' + json.dumps(dict(episode=self.global_step,
                       worker_id=self.meta_agent_id, **record)), flush=True)
             self.recovery = StagnationRecovery(self.env.robot_belief, self.env.robot_locations, emit)
-        # Keep legacy plot flags off: V1 owns read-only macro-step visualization.
+        # Keep legacy plot flags off: V1 owns read-only visualization.
         self.gif_recorder = None
         if gif_dir is not None:
             from utils.v1_gif import V1EpisodeGif
-            self.gif_recorder = V1EpisodeGif(gif_dir, global_step, meta_agent_id, gif_frame_every, filename_prefix=gif_prefix)
+            self.gif_recorder = V1EpisodeGif(gif_dir, global_step, meta_agent_id, gif_frame_every,
+                                             filename_prefix=gif_prefix, frame_mode=gif_frame_mode,
+                                             frame_duration=gif_frame_duration)
 
     def _write_gif(self, method, *args, **kwargs):
         try:
@@ -141,6 +144,11 @@ class V1Worker(MultiAgentWorker):
                     # no extra scan and no Ground Truth input to recovery.
                     self.agent_new_belief_cells[robot.id] += int(np.count_nonzero(
                         unknown_before & (self.env.robot_belief != UNKNOWN)))
+            if self.gif_recorder is not None and self.gif_recorder.frame_mode == 'substep':
+                # All four existing scans have finished. Pass their computed
+                # poses to the renderer without assigning simulation state.
+                self._write_gif('record_substep', self.completed_steps + 1, substep + 1,
+                                [p[substep] for p in positions], [h[substep] for h in headings])
         for robot, goal in zip(self.robot_list, goals):
             self.env.final_sim_step(goal, robot.id)
         return np.asarray(finals)

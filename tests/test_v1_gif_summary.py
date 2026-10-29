@@ -16,6 +16,7 @@ def test_driver_writes_gif_and_final_snapshot_summary(tmp_path, capsys):
     with Image.open(gifs[0]) as image:assert image.n_frames >= 2
     with Image.open(pngs[0]) as image:image.verify()
     metadata = json.loads(next(tmp_path.rglob('frames.json')).read_text())
+    assert metadata['frame_mode'] == 'substep' and metadata['frame_count'] == 13
     assert Path(metadata['final_frame_path']).exists()
     assert len(list(Path(metadata['final_frame_path']).parent.glob('frame_*.png'))) == 1
     assert 'V1_GIF_ERROR' not in capsys.readouterr().out

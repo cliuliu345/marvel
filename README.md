@@ -135,7 +135,7 @@ are retained in the JSON log; evaluation errors do not count as training failure
 Each invocation creates a unique run directory:
 `gifs/v1_run1/run_<UTC timestamp>_seed<seed>_<unique>/`.
 Each selected episode keeps its own `episode_<id>_worker_<id>_<unique>/`
-subdirectory with the GIF, `frames.json`, and final `frame_NNNN.png`.
+subdirectory with the GIF, `frames.json`, and final frame PNG (including its substep suffix).
 `make_gif` deletes intermediate PNGs but explicitly retains the final PNG.
 After successful encoding, both the GIF and final snapshot are also copied to
 `<unique run directory>/summary/ep000064_w0_cov99.12.gif` and the matching `.png`.
@@ -143,7 +143,14 @@ The `cov` value is coverage in percent. Original episode directories are retaine
 Evaluation copies have an additional `eval_trainNNNNNN_` prefix so rounds on the
 same fixed map cannot overwrite each other.
 
-By default V1 renders one frame per macro step, plus the initial frame; MARVEL
-renders each of its six simulation substeps (six frames per macro step).
-`--gif-frame-every N` can subsample V1 macro steps; the final frame is always saved.
-This rendering difference does not alter scans, actions, rewards or training.
+V1 now defaults to `--gif-frame-mode substep`, matching MARVEL's six frames per
+macro step, plus one initial frame. Every frame is rendered after all four UAVs
+finish that substep's existing scans, using their computed substep poses and trails.
+`--gif-frame-mode macro` retains the previous one-frame-per-macro-step behavior.
+`--gif-frame-every N` still selects macro steps: every selected macro step renders
+all six substeps. The final macro step is always retained, even off the interval;
+at most six read-only snapshots are buffered to preserve it without extra scans.
+`--gif-frame-duration` is in seconds: omitted means 0.1 in substep mode or 0.5 in
+macro mode. These options apply to training GIFs, periodic evaluation GIFs, and
+`tools/v1_explore_check.py` (enable diagnostic GIFs with `--gif-dir PATH`).
+Rendering never modifies scan order, poses, graph caches, RNG, rewards or training.
