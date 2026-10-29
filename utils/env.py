@@ -16,9 +16,10 @@ from utils.utils import *
 
 class Env:
     def __init__(self, episode_index, fov, sensor_range, plot=False, sensor_capabilities=None, rng=None,
-                 map_directory='maps_medium'):
+                 map_directory='maps_medium', map_path=None):
         self.episode_index = episode_index
         self.map_directory = map_directory
+        self.requested_map_path = map_path
         self.plot = plot
         self.n_agents = N_AGENTS
         self.rng = np.random if rng is None else rng
@@ -70,9 +71,12 @@ class Env:
 
     def import_ground_truth(self, episode_index):
         map_dir = self.map_directory
-        map_list = os.listdir(map_dir)
-        map_index = episode_index % np.size(map_list)
-        self.map_path = os.path.join(map_dir, map_list[map_index])
+        if self.requested_map_path is None:
+            map_list = os.listdir(map_dir)
+            map_index = episode_index % np.size(map_list)
+            self.map_path = os.path.join(map_dir, map_list[map_index])
+        else:
+            self.map_path = os.fspath(self.requested_map_path)
         ground_truth = (io.imread(self.map_path, 1)).astype(int)
 
         ground_truth = block_reduce(ground_truth, 2, np.min)

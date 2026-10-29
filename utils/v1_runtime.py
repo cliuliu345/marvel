@@ -12,10 +12,10 @@ def episode_map_path(map_directory, episode):
         return None
 
 
-def episode_error_info(error, worker_id, episode, map_directory):
+def episode_error_info(error, worker_id, episode, map_directory, map_path=None):
     return dict(error=True, error_type=type(error).__name__, error_message=str(error),
                 traceback=traceback.format_exc(), id=worker_id, meta_agent_id=worker_id,
-                episode_number=episode, map_path=episode_map_path(map_directory, episode))
+                episode_number=episode, map_path=os.fspath(map_path) if map_path is not None else episode_map_path(map_directory, episode))
 
 
 def atomic_checkpoint(payload, path):

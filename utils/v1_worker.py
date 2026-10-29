@@ -16,13 +16,13 @@ from utils.v1_rewards import FrontierRewardSnapshot, episode_flags
 class V1Worker(MultiAgentWorker):
     def __init__(self, meta_agent_id, policy_net, global_step, device='cpu', max_steps=MAX_EPISODE_STEP,
                  record_joint=True, greedy=False, map_directory='maps_medium', gif_dir=None, gif_frame_every=1,
-                 stagnation_recovery=False):
+                 stagnation_recovery=False, map_path=None):
         if not getattr(policy_net, 'uses_v1_actor_observation', False):
             raise TypeError('V1Worker requires the capability-conditioned Actor')
         if not 1 <= max_steps <= MAX_EPISODE_STEP:
             raise ValueError('V1 episodes allow at most 128 macro steps')
         super().__init__(meta_agent_id, policy_net, global_step, device=device,
-                         record_episode=False, map_directory=map_directory)
+                         record_episode=False, map_directory=map_directory, map_path=map_path)
         self.max_steps = max_steps
         self.record_joint = record_joint
         self.greedy = greedy
