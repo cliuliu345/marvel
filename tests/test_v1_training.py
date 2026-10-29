@@ -49,11 +49,11 @@ class V1TrainingTests(unittest.TestCase):
                     torch.testing.assert_close(critic.node_coordinates[0, critic.agent_commanded_indices[0]],
                                                state.context.commanded_coordinates)
             torch.testing.assert_close(transition.executed_goals, transition.next_state.context.current_coordinates)
-        # Serialization and insertion copy snapshots instead of retaining mutable aliases.
+        # Snapshot creation isolates mutable inputs; Replay takes ownership of read-only snapshots.
         detached = pickle.loads(pickle.dumps(first))
         validate_transition(detached)
         buffer = JointReplayBuffer(capacity=2)
-        buffer.add(detached)
+        buffer.add(cpu_snapshot(detached))
         saved_reward = buffer.transitions[0].rewards.clone()
         detached.rewards.fill_(999)
         torch.testing.assert_close(buffer.transitions[0].rewards, saved_reward)

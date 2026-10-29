@@ -126,6 +126,7 @@ class V1Worker(MultiAgentWorker):
 
     def run_episode(self):
         started = time.perf_counter()
+        snapshot_memo = {}
         self.update_shared_graph()
         for robot in self.robot_list:
             robot.update_planning_state(self.env.robot_locations)
@@ -170,7 +171,7 @@ class V1Worker(MultiAgentWorker):
                     torch.tensor(goals, dtype=torch.float32), torch.tensor(finals, dtype=torch.float32),
                     torch.tensor(rewards, dtype=torch.float32), torch.tensor(components, dtype=torch.float32),
                     next_state, terminated, truncated)
-                transition = cpu_snapshot(transition)
+                transition = cpu_snapshot(transition, snapshot_memo)
                 validate_transition(transition)
                 self.joint_transitions.append(transition)
             state = next_state

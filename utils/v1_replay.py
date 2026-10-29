@@ -1,6 +1,6 @@
 """Joint macro-step Replay and explicit four-agent SAC batch collation."""
 from collections import deque
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 import random
 
 import torch
@@ -10,15 +10,101 @@ from utils.actor_observation import ActorObservation, CandidateActionTable
 from utils.critic_observation import CriticObservation, JointActionContext
 
 
-def cpu_snapshot(value):
-    """No tensors in Replay alias mutable worker caches or retain autograd graphs."""
+def cpu_snapshot(value, memo=None):
+    """Create owned read-only CPU data, preserving aliases within an episode.
+
+    Keep sources alive alongside snapshots: otherwise Python may reuse an id
+    after a worker releases a temporary object. The memo is episode-scoped.
+    """
+    if memo is None:
+        memo = {}
+    key = id(value)
+    if key in memo:
+        return memo[key][1]
     if isinstance(value, torch.Tensor):
-        return value.detach().cpu().clone()
-    if is_dataclass(value):
-        return type(value)(**{field.name: cpu_snapshot(getattr(value, field.name)) for field in fields(value)})
-    if isinstance(value, tuple):
-        return tuple(cpu_snapshot(item) for item in value)
-    return value
+        result = value.detach().cpu().clone()
+    elif is_dataclass(value):
+        result = type(value)(**{f.name: cpu_snapshot(getattr(value, f.name), memo) for f in fields(value)})
+        if isinstance(result, JointState):
+            result = intern_joint_state(result)
+    elif isinstance(value, tuple):
+        result = tuple(cpu_snapshot(item, memo) for item in value)
+    else:
+        return value
+    memo[key] = (value, result)
+    return result
+
+
+def intern_joint_state(state):
+    """Intern equal shared geometry; callers must never mutate Replay tensors."""
+    def group(observations, names):
+        canonical = {name: [] for name in names}
+        result = []
+        for obs in observations:
+            changes = {}
+            for name in names:
+                tensor = getattr(obs, name)
+                shared = next((old for old in canonical[name] if old.dtype == tensor.dtype
+                               and old.shape == tensor.shape and torch.equal(old, tensor)), None)
+                if shared is None:
+                    canonical[name].append(tensor)
+                elif shared is not tensor:
+                    changes[name] = shared
+            result.append(replace(obs, **changes) if changes else obs)
+        return tuple(result)
+    common = ('polar_frontiers', 'heading_visited', 'edge_mask', 'node_padding_mask')
+    actors = group(state.actors, common)
+    critics = group(state.critics, common + ('node_coordinates',))
+    if all(a is b for a, b in zip(actors + critics, state.actors + state.critics)):
+        return state
+    return replace(state, actors=actors, critics=critics)
+
+
+def fields_equal(a, b):
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, torch.Tensor):
+        return a.dtype == b.dtype and a.shape == b.shape and torch.equal(a, b)
+    if is_dataclass(a):
+        return all(fields_equal(getattr(a, f.name), getattr(b, f.name)) for f in fields(a))
+    if isinstance(a, tuple):
+        return len(a) == len(b) and all(fields_equal(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def replay_unique_bytes(buffer):
+    """Count live tensor storage once, including views and adjacent states."""
+    objects, storages = set(), {}
+    def visit(value):
+        if id(value) in objects:
+            return
+        objects.add(id(value))
+        if isinstance(value, torch.Tensor):
+            storage = value.untyped_storage()
+            storages[(str(value.device), storage.data_ptr())] = storage.nbytes()
+        elif is_dataclass(value):
+            for f in fields(value):
+                visit(getattr(value, f.name))
+        elif isinstance(value, (tuple, list, deque)):
+            for item in value:
+                visit(item)
+    visit(buffer.transitions if hasattr(buffer, 'transitions') else buffer)
+    return sum(storages.values())
+
+
+def process_rss_bytes():
+    """Current Linux RSS; portable fallback reports the process high-water mark."""
+    try:
+        with open('/proc/self/status') as stream:
+            for line in stream:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    import resource
+    import sys
+    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(usage if sys.platform == 'darwin' else usage * 1024)
 
 
 @dataclass(frozen=True)
@@ -104,13 +190,35 @@ class JointReplayBuffer:
             raise ValueError('Replay capacity must be positive')
         self.transitions = deque(maxlen=capacity)
         self.rng = random.Random(seed)
+        self._last_by_episode = {}
+        self._episode_counts = {}
 
     def __len__(self):
         return len(self.transitions)
 
     def add(self, transition):
         validate_transition(transition)
-        self.transitions.append(cpu_snapshot(transition))
+        # Ownership transfers to Replay. Its tensors are read-only; collation
+        # allocates fresh tensors before any learner operation.
+        episode = transition.episode_id
+        previous = self._last_by_episode.get(episode)
+        state = transition.state
+        if (previous is not None and previous.episode_id == episode
+                and previous.step + 1 == transition.step
+                and previous.next_state.context.frontier_version == state.context.frontier_version
+                and fields_equal(previous.next_state, state)):
+            state = previous.next_state
+        transition = replace(transition, state=intern_joint_state(state),
+                             next_state=intern_joint_state(transition.next_state))
+        if len(self.transitions) == self.transitions.maxlen:
+            expired = self.transitions[0].episode_id
+            self._episode_counts[expired] -= 1
+            if self._episode_counts[expired] == 0:
+                del self._episode_counts[expired]
+                self._last_by_episode.pop(expired, None)
+        self.transitions.append(transition)
+        self._last_by_episode[episode] = transition
+        self._episode_counts[episode] = self._episode_counts.get(episode, 0) + 1
 
     def sample(self, joint_batch_size):
         return self.rng.sample(list(self.transitions), joint_batch_size)

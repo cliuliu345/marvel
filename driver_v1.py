@@ -19,7 +19,7 @@ import torch
 from parameter import MAX_EPISODE_STEP, MINIMUM_BUFFER_SIZE, N_AGENTS
 from utils.model import CapabilityConditionedActor
 from utils.runner import V1Runner, V1RLRunner
-from utils.v1_replay import JointReplayBuffer, collate_transitions
+from utils.v1_replay import JointReplayBuffer, collate_transitions, replay_unique_bytes, process_rss_bytes
 from utils.v1_sac import V1SACLearner
 from utils.v1_tensorboard import tensorboard_writer, write_episode, write_update
 
@@ -142,7 +142,8 @@ def _run(args, writer):
                 print('V1_UPDATE ' + json.dumps(update), flush=True)
                 write_update(writer, update)
         episode_record = dict(episode=info['episode_number'], worker_id=info['id'],
-                              joint_replay_size=len(replay), **metrics)
+                              joint_replay_size=len(replay), replay_unique_bytes=replay_unique_bytes(replay),
+                              process_rss_bytes=process_rss_bytes(), **metrics)
         print('V1_EPISODE ' + json.dumps(episode_record), flush=True)
         write_episode(writer, episode_record)
 
