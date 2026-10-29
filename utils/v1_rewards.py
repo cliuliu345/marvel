@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from parameter import FREE, FRONTIER_CELL_SIZE
+from parameter import FREE, FRONTIER_CELL_SIZE, TEAM_FRONTIER_NORMALIZER
 
 
 def coverage_rate(ground_truth, belief):
@@ -55,7 +55,7 @@ class FrontierRewardSnapshot:
 
     def finish_rewards(self, individual, next_frontiers, terminated):
         frontier, trajectory = individual
-        team = len(self.frontiers - frozenset(next_frontiers)) / 39. - 0.5
+        team = len(self.frontiers - frozenset(next_frontiers)) / TEAM_FRONTIER_NORMALIZER - 0.5
         terminal = 10. if terminated else 0.
         # Columns make the actual reward calculation inspectable in Replay.
         components = np.stack((frontier, trajectory, np.full_like(frontier, team),
