@@ -21,6 +21,7 @@ from utils.model import CapabilityConditionedActor
 from utils.runner import V1Runner, V1RLRunner
 from utils.v1_replay import JointReplayBuffer, collate_transitions, replay_unique_bytes, process_rss_bytes
 from utils.v1_sac import V1SACLearner
+from utils.v1_runtime import episode_error_info
 from utils.v1_tensorboard import tensorboard_writer, write_episode, write_update
 
 
@@ -37,6 +38,8 @@ def build_parser():
     parser.add_argument('--verify-updates', action='store_true',
                         help='Record parameter changes and check finite parameters/gradients after each update')
     parser.add_argument('--ray-workers', type=int, default=0, help='0 runs the same Runner locally')
+    parser.add_argument('--max-consecutive-failures', type=int, default=5)
+    parser.add_argument('--local-worker-id', type=int, default=0)
     parser.add_argument('--device', default='cpu', choices=('cpu', 'cuda'))
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--map-directory', default=None)
@@ -72,6 +75,8 @@ def _run(args, writer):
         raise ValueError('Episode/batch/update counts must be positive; Ray worker count must be nonnegative')
     if not 1 <= args.max_steps <= MAX_EPISODE_STEP:
         raise ValueError('Macro-step limit must be between 1 and 128')
+    if args.max_consecutive_failures < 1 or args.local_worker_id < 0:
+        raise ValueError('Failure limit must be positive and worker ID nonnegative')
     if args.warmup_agent_samples < 0:
         raise ValueError('Warm-up agent sample count must be nonnegative')
     if args.save_gif_every < 0 or args.gif_frame_every < 1:
@@ -93,6 +98,7 @@ def _run(args, writer):
             learner.load_checkpoint(checkpoint)
     replay = JointReplayBuffer(seed=args.seed)
     updates, episode_metrics = [], []
+    failed_episodes = consecutive_failures = 0
     map_directory = args.map_directory or ('maps_test' if args.evaluate else 'maps_medium')
     runner_options = dict(max_steps=args.max_steps, record_joint=not args.evaluate,
                           greedy=args.evaluate, map_directory=map_directory,
@@ -109,7 +115,17 @@ def _run(args, writer):
         return [{name: value.detach().cpu().clone() for name, value in actor.state_dict().items()}]
 
     def consume(result):
+        nonlocal failed_episodes, consecutive_failures
         transitions, metrics, info = result
+        if info.get('error', False):
+            failed_episodes += 1
+            consecutive_failures += 1
+            print('V1_EPISODE_ERROR ' + json.dumps(dict(info, failed_episodes=failed_episodes,
+                  consecutive_failures=consecutive_failures)), flush=True)
+            if consecutive_failures >= args.max_consecutive_failures:
+                raise RuntimeError('Maximum consecutive V1 episode failures reached')
+            return
+        consecutive_failures = 0
         episode_metrics.append(metrics)
         for transition in transitions:
             replay.add(transition)
@@ -143,40 +159,52 @@ def _run(args, writer):
                 write_update(writer, update)
         episode_record = dict(episode=info['episode_number'], worker_id=info['id'],
                               joint_replay_size=len(replay), replay_unique_bytes=replay_unique_bytes(replay),
-                              process_rss_bytes=process_rss_bytes(), **metrics)
+                              process_rss_bytes=process_rss_bytes(), failed_episodes=failed_episodes, **metrics)
         print('V1_EPISODE ' + json.dumps(episode_record), flush=True)
         write_episode(writer, episode_record)
 
-    if args.ray_workers:
-        import ray
-        ray.init(num_cpus=args.ray_workers, include_dashboard=False)
-        runners = []
-        try:
-            runners = [V1RLRunner.remote(index, **runner_options) for index in range(min(args.ray_workers, args.episodes))]
-            pending, launched = {}, 0
-            for runner in runners:
-                ref = runner.job.remote(weights(), args.start_episode + launched)
-                pending[ref], launched = runner, launched + 1
-            while pending:
-                completed, _ = ray.wait(list(pending), num_returns=1)
-                for ref in completed:
-                    runner = pending.pop(ref)
-                    consume(ray.get(ref))
-                    if launched < args.episodes:
-                        pending[runner.job.remote(weights(), args.start_episode + launched)] = runner
-                        launched += 1
-        finally:
-            for runner in runners:
-                ray.kill(runner)
-            ray.shutdown()
-    else:
-        runner = V1Runner(0, **runner_options)
-        for episode in range(args.start_episode, args.start_episode + args.episodes):
-            consume(runner.job(weights(), episode))
-    if args.checkpoint_out and learner is not None:
-        path = Path(args.checkpoint_out)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(learner.checkpoint(), path)
+    try:
+        if args.ray_workers:
+            import ray
+            ray.init(num_cpus=args.ray_workers, include_dashboard=False)
+            runners = {}
+            try:
+                pending, launched = {}, 0
+                for worker_id in range(min(args.ray_workers, args.episodes)):
+                    runner = V1RLRunner.remote(worker_id, **runner_options)
+                    runners[worker_id] = runner
+                    episode = args.start_episode + launched
+                    pending[runner.job.remote(weights(), episode)] = (worker_id, episode)
+                    launched += 1
+                while pending:
+                    completed, _ = ray.wait(list(pending), num_returns=1)
+                    for ref in completed:
+                        worker_id, episode = pending.pop(ref)
+                        try:
+                            result = ray.get(ref)
+                        except (ray.exceptions.RayActorError, ray.exceptions.WorkerCrashedError) as error:
+                            result = ([], {}, episode_error_info(error, worker_id, episode, map_directory))
+                            ray.kill(runners[worker_id])
+                            runners[worker_id] = V1RLRunner.remote(worker_id, **runner_options)
+                        consume(result)
+                        if launched < args.episodes:
+                            episode = args.start_episode + launched
+                            pending[runners[worker_id].job.remote(weights(), episode)] = (worker_id, episode)
+                            launched += 1
+            finally:
+                for runner in runners.values():
+                    ray.kill(runner)
+                ray.shutdown()
+        else:
+            runner = V1Runner(args.local_worker_id, **runner_options)
+            for episode in range(args.start_episode, args.start_episode + args.episodes):
+                consume(runner.job(weights(), episode))
+    finally:
+        # T4 adds atomic periodic/latest saves and resume metadata here.
+        if args.checkpoint_out and learner is not None:
+            path = Path(args.checkpoint_out)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(learner.checkpoint(), path)
     return learner, replay, updates, episode_metrics
 
 

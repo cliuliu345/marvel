@@ -87,6 +87,17 @@ class V1Runner(Runner):
         self.gif_frame_every = gif_frame_every
         self.stagnation_recovery = stagnation_recovery
 
+    def job(self, weights_set, episode_number):
+        from utils.v1_runtime import episode_error_info
+        self.set_policy_net_weights(weights_set[0])
+        try:
+            transitions, metrics = self.do_job(episode_number)
+        except Exception as error:
+            # Discard the entire partial episode; validations remain mandatory.
+            return [], {}, episode_error_info(error, self.meta_agent_id, episode_number, self.map_directory)
+        return transitions, metrics, dict(id=self.meta_agent_id, meta_agent_id=self.meta_agent_id,
+                                         episode_number=episode_number)
+
     def do_job(self, episode_number):
         from utils.v1_worker import V1Worker
         save_gif = self.save_gif_every > 0 and episode_number % self.save_gif_every == 0
