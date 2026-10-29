@@ -154,3 +154,48 @@ at most six read-only snapshots are buffered to preserve it without extra scans.
 macro mode. These options apply to training GIFs, periodic evaluation GIFs, and
 `tools/v1_explore_check.py` (enable diagnostic GIFs with `--gif-dir PATH`).
 Rendering never modifies scan order, poses, graph caches, RNG, rewards or training.
+
+### Heterogeneous-sensing maps
+
+`maps_medium` contains narrow 5 m corridors and small rooms, where a short
+wide sensor dominates everywhere and capability allocation barely matters.
+`tools/gen_hetero_maps.py` generates 80 m x 80 m maps in the same PNG format
+(127 obstacle, 195 free, 208 start; 2 px per 0.4 m cell) that combine two
+zone families:
+
+| Family | Zones | Favours |
+|---|---|---|
+| narrow | open halls with sparse pillars; warehouse aisles | 45 deg / 12 m sensor |
+| wide | cubicle clutter (furniture, partitions, pillars); room suites | 180 deg / 6 m sensor |
+
+The two sensors of the `compact` profile have the same nominal sector area
+(~56.5 m^2), so which one sees more depends only on the scene. Default mix is
+70% mixed maps (each family 30-70% of the nodes, with a minimum per-map
+contrast) and 15% of each pure family. Layout follows the 4 m node lattice:
+Env anchors nodes at the start cell, which is a block centre, so each free
+block is exactly one node (146-240 per map, below `NODE_PADDING_SIZE`).
+Every map is checked for a single connected free component, at least six
+initial nodes inside the 6 m start scan, and full visibility of every free
+cell from some node with the 6 m range (so 99% coverage is reachable).
+
+```bash
+python tools/gen_hetero_maps.py --out maps_hetero_train --num 4000 --seed 0 --workers 8
+python tools/gen_hetero_maps.py --out maps_hetero_test --num 100 --seed 1 --workers 8
+MARVEL_SENSOR_PROFILE=compact python driver_v1.py --map-directory maps_hetero_train/maps \
+    --eval-maps maps_hetero_test/maps ...
+```
+
+`OUT/maps` holds only PNGs (Env lists the directory). `OUT/zones` has
+per-cell zone labels at Env resolution (0 solid, 1 hall, 2 aisles, 3 clutter,
+4 rooms, 5 connector) for allocation analysis, e.g. the share of time each
+sensor type spends in its favoured zones. `OUT/meta.jsonl` records node
+counts, zone shares and per-family sight lines and visible areas.
+
+`MARVEL_SENSOR_PROFILE=compact` (or `SENSOR_PROFILE` in `parameter.py`)
+switches to sensors (180 deg, 6 m) x2 and (45 deg, 12 m) x2, `SENSOR_RANGE` 12,
+`INITIAL_SCAN_RANGE` 6 and `FRONTIER_REPRESENTATION_RANGE` 16. The default
+`marvel` profile is unchanged. Before long runs, calibrate on the new maps:
+`TEAM_FRONTIER_NORMALIZER` (39, from the original 10 m range) should match the
+mean frontier cells removed per macro step, and `tools/v1_explore_check.py`
+with the guidepost/random policies should show the maps are completable
+within 128 macro steps.
