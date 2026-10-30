@@ -10,7 +10,7 @@ from utils.motion_model import compute_allowable_heading
 from utils.multi_agent_worker import MultiAgentWorker
 from utils.utils import get_cell_position_from_coords
 from utils.v1_replay import JointState, JointTransition, cpu_snapshot, validate_transition
-from utils.v1_rewards import FrontierRewardSnapshot, episode_flags
+from utils.v1_rewards import COMPONENT_NAMES, REWARD_VARIANTS, FrontierRewardSnapshot, ScanShareTracker, episode_flags
 
 
 class V1Worker(MultiAgentWorker):
@@ -28,6 +28,8 @@ class V1Worker(MultiAgentWorker):
             raise ValueError('Rule policies are only available for diagnostic evaluation')
         self.diagnostic_policy = diagnostic_policy
         self.decision_records = []
+        self.reward_variant, self.scan_tracker = 'legacy', None
+        self.episode_components = np.zeros((len(self.robot_list), len(COMPONENT_NAMES)))
         self.max_steps = max_steps
         self.record_joint = record_joint
         self.greedy = greedy
@@ -51,6 +53,34 @@ class V1Worker(MultiAgentWorker):
             self.gif_recorder = V1EpisodeGif(gif_dir, global_step, meta_agent_id, gif_frame_every,
                                              filename_prefix=gif_prefix, frame_mode=gif_frame_mode,
                                              frame_duration=gif_frame_duration)
+
+    def configure_reward(self, variant):
+        """Select the reward variant before run_episode; see utils/v1_rewards.py."""
+        if variant not in REWARD_VARIANTS:
+            raise ValueError(f'Unknown V1 reward variant {variant!r}')
+        if self.completed_steps or self.scan_tracker is not None:
+            raise RuntimeError('Configure the reward once, before the episode starts')
+        from parameter import SCAN_SHARE_NORMALIZER
+        self.reward_variant = variant
+        if variant == 'scan_share':
+            self.scan_tracker = ScanShareTracker(self.env, SCAN_SHARE_NORMALIZER)
+
+    def reward_metrics(self):
+        """Episode sums of each reward component, per UAV and per sensor type."""
+        per_agent = {name: self.episode_components[:, i].tolist() for i, name in enumerate(COMPONENT_NAMES)}
+        by_type = {}
+        for capability in sorted(set(self.sensor_capabilities)):
+            rows = [i for i, c in enumerate(self.sensor_capabilities) if c == capability]
+            key = f'{capability[0]:g}deg_{capability[1]:g}m'
+            by_type[key] = {name: float(self.episode_components[rows, i].mean())
+                            for i, name in enumerate(COMPONENT_NAMES)}
+        metrics = dict(reward_variant=self.reward_variant,
+                       agent_capabilities=[list(c) for c in self.sensor_capabilities],
+                       agent_reward_components=per_agent, reward_components_by_type=by_type)
+        if self.scan_tracker is not None:
+            metrics.update(scan_new_cells=self.scan_tracker.new_cells_total,
+                           scan_unattributed_cells=self.scan_tracker.unattributed_cells_total)
+        return metrics
 
     def _write_gif(self, method, *args, **kwargs):
         try:
@@ -188,8 +218,11 @@ class V1Worker(MultiAgentWorker):
                                       self.agent_new_belief_cells)
             terminated, truncated = episode_flags(self.env.explored_rate, completed_steps, self.max_steps)
             self.env.done = terminated
-            rewards, components = reward_snapshot.finish_rewards(individual, self.node_manager.global_frontiers, terminated)
+            shares = None if self.scan_tracker is None else self.scan_tracker.finish(self.env.robot_belief)
+            rewards, components = reward_snapshot.finish_rewards(individual, self.node_manager.global_frontiers, terminated,
+                                                                 variant=self.reward_variant, scan_shares=shares)
             self.episode_returns += rewards
+            self.episode_components += components
             # Nonterminal next commands are sampled ONCE and used unchanged at
             # the next iteration. At a time limit these commands are never executed.
             # Successful terminal states retain their graphs but issue no commands.
@@ -219,6 +252,7 @@ class V1Worker(MultiAgentWorker):
                                  min_valid_actions=self.min_valid_actions, frontier_version=self.node_manager.frontier_version,
                                  map_path=self.env.map_path, episode_seconds=time.perf_counter() - started)
 
+        self.perf_metrics.update(self.reward_metrics())
         from utils.v1_diagnostics import summarize_decisions
         self.perf_metrics.update(summarize_decisions(self.decision_records))
         self.perf_metrics['behavior_policy'] = ('Actor + Stagnation Recovery' if self.recovery is not None

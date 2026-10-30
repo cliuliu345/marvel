@@ -122,7 +122,7 @@ class JointTransition:
     executed_goals: torch.Tensor       # [4,2], physical meters after conflict resolution
     executed_headings: torch.Tensor    # [4], actual final degrees
     rewards: torch.Tensor              # [4]
-    reward_components: torch.Tensor    # [4,4]: frontier, trajectory, team, success
+    reward_components: torch.Tensor    # [4,4]: individual, trajectory, team, terminal (utils/v1_rewards.py)
     next_state: JointState
     terminated: bool
     truncated: bool

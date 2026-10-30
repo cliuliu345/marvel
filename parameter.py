@@ -75,6 +75,10 @@ DRONE_HEIGHT = 2
 CELL_SIZE = 0.4  # meter
 NODE_RESOLUTION = 4.0  # meter
 FRONTIER_CELL_SIZE = 2 * CELL_SIZE
+# scan_share reward: newly observed cells / mean nominal sector area in cells,
+# the same divisor for every UAV (compact: 56.5 m^2 / 0.16 m^2 = 353.4).
+SCAN_SHARE_NORMALIZER = (sum(f / 360. * 3.141592653589793 * r * r for f, r in EPISODE_SENSOR_CAPABILITIES)
+                         / len(EPISODE_SENSOR_CAPABILITIES) / CELL_SIZE ** 2)
 
 # map representation
 FREE = 255

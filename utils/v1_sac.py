@@ -24,7 +24,10 @@ def discrete_expectation(probabilities, logp, q_values, valid, alpha):
 
 
 class V1SACLearner:
-    def __init__(self, device='cpu'):
+    def __init__(self, device='cpu', gamma=GAMMA):
+        if not 0 < gamma <= 1:
+            raise ValueError('Discount must be in (0, 1]')
+        self.gamma = float(gamma)
         self.device = torch.device(device)
         self.actor = CapabilityConditionedActor().to(self.device)
         self.q1 = CapabilityConditionedCritic().to(self.device)
@@ -55,7 +58,7 @@ class V1SACLearner:
             probabilities, logp = masked_distribution(self.actor(*batch.next_actor.network_inputs()), valid)
             q_values = torch.minimum(self.target_q1(batch.next_critic), self.target_q2(batch.next_critic))
             values = discrete_expectation(probabilities, logp, q_values, valid, self.log_alpha.exp())
-            targets[rows] += GAMMA * values
+            targets[rows] += self.gamma * values
         if not torch.isfinite(targets).all():
             raise FloatingPointError('Nonfinite V1 Bellman targets')
         return targets
@@ -110,11 +113,15 @@ class V1SACLearner:
                     target_q1_model=self.target_q1.state_dict(), target_q2_model=self.target_q2.state_dict(),
                     log_alpha=self.log_alpha.detach().clone(), policy_optimizer=self.actor_optimizer.state_dict(),
                     q_net1_optimizer=self.q1_optimizer.state_dict(), q_net2_optimizer=self.q2_optimizer.state_dict(),
-                    log_alpha_optimizer=self.alpha_optimizer.state_dict(), updates=self.updates)
+                    log_alpha_optimizer=self.alpha_optimizer.state_dict(), updates=self.updates,
+                    gamma=self.gamma)
 
     def load_checkpoint(self, checkpoint):
         if checkpoint.get('format') != 'marvel-heterogeneous-v1':
             raise ValueError('V1 training requires a V1 checkpoint, not legacy network weights')
+        # Checkpoints without a stored discount predate --gamma and used GAMMA=1.
+        if float(checkpoint.get('gamma', 1.0)) != self.gamma:
+            raise ValueError(f"Checkpoint discount {checkpoint.get('gamma', 1.0)} differs from --gamma {self.gamma}")
         for model, name in ((self.actor, 'policy_model'), (self.q1, 'q_net1_model'), (self.q2, 'q_net2_model'),
                             (self.target_q1, 'target_q1_model'), (self.target_q2, 'target_q2_model')):
             model.load_state_dict(checkpoint[name])

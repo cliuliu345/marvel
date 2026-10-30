@@ -203,3 +203,32 @@ test maps; with 5.4 it solved 18/20 (98.2% mean coverage). The default
 mean frontier cells removed per macro step, and `tools/v1_explore_check.py`
 with the guidepost/random policies should show the maps are completable
 within 128 macro steps.
+
+### V1 reward variants
+
+`--reward` selects the per-step reward and `--gamma` the SAC discount; both are
+stored in checkpoints, and `--resume` refuses a different value.
+
+| `--reward` | individual term | trajectory term | team / terminal |
+|---|---|---|---|
+| `legacy` (default) | frontiers in the commanded FoV at the goal (pre-scan) | cos(heading - travel) | removed frontiers / 39 - 0.5; +10 on success |
+| `no_traj` | as legacy | 0 | as legacy |
+| `scan_share` | cells newly observed this step, each shared 1/k among the k UAVs whose sensor covered it, / `SCAN_SHARE_NORMALIZER` | 0 | as legacy |
+
+`legacy` with `GAMMA=1` pays every UAV about +1 per step for flying nose-first,
+so continuing outweighs the +10 success reward and truncated steps bootstrap
+without bound. `no_traj` removes that term, making the return
+`removed frontiers / 39 - 0.5 x steps + 10`, which favours finishing early.
+`scan_share` also replaces the frontier-intent term, which can be collected
+repeatedly at a node without observing anything new. Its shares are
+independent of scan order and sum to the team's newly observed cells.
+`SCAN_SHARE_NORMALIZER` is the mean nominal sector area in cells and is the
+same for all UAVs (compact: 353.4). Episode logs add `reward_variant`,
+per-UAV and per-sensor-type component sums, and for `scan_share`
+`scan_new_cells` / `scan_unattributed_cells` (expected 0). TensorBoard adds
+`V1/Reward/<sensor>/<component>` and `V1/SAC/target_min|target_max`.
+
+```bash
+MARVEL_SENSOR_PROFILE=compact python driver_v1.py --reward no_traj --gamma 0.99 ...
+MARVEL_SENSOR_PROFILE=compact python driver_v1.py --reward scan_share --gamma 0.99 ...
+```

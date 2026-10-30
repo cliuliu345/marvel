@@ -16,7 +16,7 @@ import time
 import numpy as np
 import torch
 
-from parameter import MAX_EPISODE_STEP, MINIMUM_BUFFER_SIZE, N_AGENTS
+from parameter import GAMMA, MAX_EPISODE_STEP, MINIMUM_BUFFER_SIZE, N_AGENTS
 from utils.model import CapabilityConditionedActor
 from utils.runner import V1Runner, V1RLRunner
 from utils.v1_replay import JointReplayBuffer, collate_transitions, replay_unique_bytes, process_rss_bytes
@@ -78,7 +78,30 @@ def build_parser():
     parser.add_argument('--eval-num-maps', type=int, default=20)
     parser.add_argument('--eval-seed', type=int, default=0)
     parser.add_argument('--evaluate', action='store_true')
+    parser.add_argument('--reward', default='legacy', choices=('legacy', 'no_traj', 'scan_share'),
+                        help='Reward variant, see utils/v1_rewards.py (default: legacy)')
+    parser.add_argument('--gamma', type=float, default=GAMMA,
+                        help='SAC discount (default: parameter.GAMMA = 1)')
     return parser
+
+
+def run_config(args):
+    import parameter
+    return dict(reward_variant=args.reward, gamma=float(args.gamma), sensor_profile=parameter.SENSOR_PROFILE,
+                sensor_capabilities=[list(c) for c in parameter.EPISODE_SENSOR_CAPABILITIES],
+                utility_range=parameter.UTILITY_RANGE, team_frontier_normalizer=parameter.TEAM_FRONTIER_NORMALIZER,
+                scan_share_normalizer=parameter.SCAN_SHARE_NORMALIZER)
+
+
+def check_resume_config(checkpoint, config):
+    # Checkpoints from before these fields existed were legacy / GAMMA=1 runs.
+    saved = dict(reward_variant=checkpoint.get('reward_variant', 'legacy'),
+                 gamma=float(checkpoint.get('gamma', 1.0)))
+    if 'sensor_profile' in checkpoint:
+        saved['sensor_profile'] = checkpoint['sensor_profile']
+    mismatched = {key: (value, config[key]) for key, value in saved.items() if config[key] != value}
+    if mismatched:
+        raise ValueError(f'Resume configuration differs from the checkpoint (saved, requested): {mismatched}')
 
 
 def run(args):
@@ -119,10 +142,14 @@ def _run(args, writer):
         raise ValueError('Invalid independent evaluation configuration')
     if args.evaluate and args.eval_every:
         raise ValueError('Periodic evaluation is only available during training')
+    if not 0 < args.gamma <= 1:
+        raise ValueError('--gamma must be in (0, 1]')
+    config = run_config(args)
+    print('V1_CONFIG ' + json.dumps(config), flush=True)
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    learner = None if args.evaluate else V1SACLearner(args.device)
+    learner = None if args.evaluate else V1SACLearner(args.device, gamma=args.gamma)
     actor = CapabilityConditionedActor().to(args.device) if args.evaluate else learner.actor
     checkpoint = None
     if args.checkpoint or args.resume:
@@ -130,6 +157,7 @@ def _run(args, writer):
         if args.resume:
             if 'next_episode' not in checkpoint:
                 raise ValueError('Resume checkpoint does not contain next_episode')
+            check_resume_config(checkpoint, config)
             args.start_episode = int(checkpoint['next_episode'])
         if args.evaluate:
             if checkpoint.get('format') != 'marvel-heterogeneous-v1':
@@ -149,7 +177,8 @@ def _run(args, writer):
                           gif_frame_every=args.gif_frame_every, gif_frame_mode=args.gif_frame_mode,
                           gif_frame_duration=args.gif_frame_duration,
                           stagnation_recovery=args.stagnation_recovery,
-                          stagnation_recovery_episodes=0 if args.evaluate else args.stagnation_recovery_episodes)
+                          stagnation_recovery_episodes=0 if args.evaluate else args.stagnation_recovery_episodes,
+                          reward_variant=args.reward)
     run_dir = None
     if args.save_gif_every or args.eval_every:
         root = Path(args.gif_dir).expanduser().resolve()
@@ -169,7 +198,8 @@ def _run(args, writer):
             return
         path = Path(args.checkpoint_out)
         payload = dict(learner.checkpoint(), next_episode=next_episode,
-                       failed_episodes=failed_episodes, processed_episodes=processed_episodes)
+                       failed_episodes=failed_episodes, processed_episodes=processed_episodes,
+                       reward_variant=args.reward, sensor_profile=config['sensor_profile'], run_config=config)
         atomic_checkpoint(payload, path.parent / 'latest.pth')
         if episode is not None:
             atomic_checkpoint(payload, path.parent / f'ep{episode}.pth')

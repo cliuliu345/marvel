@@ -14,7 +14,8 @@ from pathlib import Path
 
 
 UPDATE_FIELDS = ('actor_loss', 'q1_loss', 'q2_loss', 'alpha_loss', 'alpha', 'entropy',
-                 'actor_grad_norm', 'q1_grad_norm', 'q2_grad_norm', 'alpha_grad_norm')
+                 'actor_grad_norm', 'q1_grad_norm', 'q2_grad_norm', 'alpha_grad_norm',
+                 'target_min', 'target_max')
 EPISODE_FIELDS = ('explored_rate', 'success_rate', 'total_reward', 'macro_steps',
                   'terminated', 'truncated')
 
@@ -49,6 +50,9 @@ def write_episode(writer, record):
             writer.add_scalar('V1/Episode/' + field, record[field], global_step=step)
     for agent_id, value in enumerate(record.get('agent_returns', ())):
         writer.add_scalar(f'V1/Episode/agent_{agent_id}_return', value, global_step=step)
+    for sensor, components in record.get('reward_components_by_type', {}).items():
+        for name, value in components.items():
+            writer.add_scalar(f'V1/Reward/{sensor}/{name}', value, global_step=step)
     reason = record.get('termination_reason')
     if reason is None:
         if record.get('terminated'):
