@@ -38,7 +38,8 @@ class V1Worker(MultiAgentWorker):
         self.episode_returns = np.zeros(len(self.robot_list), dtype=float)
         self.max_belief_nodes = self.max_gt_nodes = 0
         self.min_valid_actions = None
-        self.perf_metrics.update(conflict_replacements=0, conflict_nonadjacent=0, conflict_stay=0)
+        self.perf_metrics.update(conflict_replacements=0, conflict_nonadjacent=0, conflict_stay=0,
+                                 conflict_colocated=0)
         self.completed_steps = 0
         self.recovery = None
         if stagnation_recovery:
@@ -135,18 +136,21 @@ class V1Worker(MultiAgentWorker):
 
     @staticmethod
     def safe_replacement(table, selected, current, occupied):
-        """Nearest unoccupied legal neighbour to the selected goal, else stay, else None.
+        """Nearest unoccupied legal neighbour to the selected goal, else stay.
 
         Legal neighbours are the Actor table's valid nodes, i.e. graph edges that
         were collision-checked; ties break by distance from the current node,
-        then by coordinates, so the result is deterministic.
+        then by coordinates, so the result is deterministic. If every legal
+        neighbour is taken (a dead end), the UAV hovers in place even when a
+        teammate's goal is the same node: co-location is allowed, a wall
+        crossing or an aborted episode is not.
         """
         legal = table.node_coordinates[0, table.valid_mask[0]].cpu().numpy()
         free = [c for c in np.unique(legal, axis=0) if tuple(c) not in occupied]
         if free:
             return min(free, key=lambda c: (float(np.linalg.norm(c - selected)),
                                             float(np.linalg.norm(c - current)), tuple(c)))
-        return None if tuple(current) in occupied else current
+        return current
 
     def resolve_goals(self, context):
         # Same nearest-node/arrival-order conflict rule as MultiAgentWorker.
@@ -160,8 +164,8 @@ class V1Worker(MultiAgentWorker):
                 index = int(sequence[row])
                 current = context.current_coordinates[index].cpu().numpy()
                 replacement = self.safe_replacement(context.action_tables[index], selected, current, occupied)
-                if replacement is None:
-                    raise RuntimeError('No distinct legal execution goal available for conflict resolution')
+                if tuple(replacement) in occupied:
+                    self.perf_metrics['conflict_colocated'] = self.perf_metrics.get('conflict_colocated', 0) + 1
                 ordered[row] = goals[index] = replacement
                 self.perf_metrics['conflict_replacements'] += 1
                 self.perf_metrics['conflict_stay'] += int(np.array_equal(replacement, current))

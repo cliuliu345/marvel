@@ -54,10 +54,11 @@ def test_safe_replacement_prefers_legal_neighbour_nearest_to_selected_goal():
     np.testing.assert_array_equal(V1Worker.safe_replacement(table, selected, current, {(4., 0.)}), [4., 4.])
     np.testing.assert_array_equal(
         V1Worker.safe_replacement(table, selected, current, {(4., 0.), (4., 4.)}), [0., 4.])
-    # All legal neighbours taken: stay; current also taken: no legal goal.
+    # All legal neighbours taken: stay, even if a teammate also targets this node.
     occupied = {(4., 0.), (4., 4.), (0., 4.)}
     np.testing.assert_array_equal(V1Worker.safe_replacement(table, selected, current, occupied), current)
-    assert V1Worker.safe_replacement(table, selected, current, occupied | {(0., 0.)}) is None
+    np.testing.assert_array_equal(
+        V1Worker.safe_replacement(table, selected, current, occupied | {(0., 0.)}), current)
 
 
 def test_safe_resolve_goals_never_leaves_the_action_table():
@@ -76,6 +77,29 @@ def test_safe_resolve_goals_never_leaves_the_action_table():
     goals = worker.resolve_goals(context)
     np.testing.assert_array_equal(goals, [[1., 0.], [2., 1.], [11., 0.], [21., 0.]])
     assert worker.perf_metrics == dict(conflict_replacements=1, conflict_nonadjacent=0, conflict_stay=0)
+
+
+def test_safe_dead_end_hovers_instead_of_aborting():
+    """Training map 3291 episode 448: every legal goal, including the current node, was taken."""
+    torch = pytest.importorskip('torch')
+    from utils.v1_worker import V1Worker
+    worker = V1Worker.__new__(V1Worker)
+    worker.perf_metrics = dict(conflict_replacements=0, conflict_nonadjacent=0, conflict_stay=0,
+                               conflict_colocated=0)
+    worker.configure_motion('safe')
+    # Agent 3 sits at (4,0) in a dead end whose only neighbour is (0,0).
+    dead_end = _table([[0., 0.]] * 3 + [[8., 8.]] * 3, [True] * 3 + [False] * 3)
+    other = _table([[4., 0.]] * 3 + [[0., 0.]] * 3, [True] * 6)
+    context = NS(agent_ids=torch.arange(4),
+                 # Distinct command distances fix the arrival order: 2, 0, 1, then 3.
+                 current_coordinates=torch.tensor([[0., 2.], [7., 0.], [12., 0.], [4., 0.]]),
+                 commanded_coordinates=torch.tensor([[0., 0.], [4., 0.], [12., 1.], [0., 0.]]),
+                 action_tables=(other, other, other, dead_end))
+    goals = worker.resolve_goals(context)
+    np.testing.assert_array_equal(goals[3], [4., 0.])           # hovers, no exception
+    np.testing.assert_array_equal(goals[1], [4., 0.])           # teammate still moves in
+    assert worker.perf_metrics['conflict_colocated'] == 1
+    assert worker.perf_metrics['conflict_stay'] == 1 and worker.perf_metrics['conflict_nonadjacent'] == 0
 
 
 def test_safe_rule_executes_no_wall_crossings_on_a_hetero_map(tmp_path):
