@@ -6,7 +6,10 @@ Reward variants (selected with driver_v1.py --reward):
     scan_share  no_traj, with the frontier-intent term replaced by each UAV's
                 1/k share of the cells newly observed this macro step
 Component columns are always [individual, trajectory, team, terminal] and sum
-to the reward; unused terms are zero.
+to the reward; unused terms are zero. --individual-weight multiplies the
+individual column (default 1). It exists because SAC's entropy bonus is fixed
+in reward units: scan shares are ~0.1 per step, so with weight 1 the policy
+stayed near-random (entropy ~3.0 vs ~2.0 for legacy on the same maps).
 """
 from dataclasses import dataclass
 
@@ -66,10 +69,13 @@ class FrontierRewardSnapshot:
             trajectory.append(float(np.cos(np.deg2rad(heading) - travel_angle)) if np.any(delta) else 0.)
         return np.asarray(frontier), np.asarray(trajectory)
 
-    def finish_rewards(self, individual, next_frontiers, terminated, variant='legacy', scan_shares=None):
+    def finish_rewards(self, individual, next_frontiers, terminated, variant='legacy', scan_shares=None,
+                       individual_weight=1.0):
         frontier, trajectory = individual
         if variant not in REWARD_VARIANTS:
             raise ValueError(f'Unknown V1 reward variant {variant!r}')
+        if not (np.isfinite(individual_weight) and individual_weight > 0):
+            raise ValueError('Individual reward weight must be positive')
         if variant == 'scan_share':
             if scan_shares is None:
                 raise ValueError('scan_share rewards require per-UAV scan shares')
@@ -80,6 +86,7 @@ class FrontierRewardSnapshot:
             raise ValueError('Scan shares are only used by the scan_share variant')
         if variant != 'legacy':
             trajectory = np.zeros_like(trajectory)
+        frontier = individual_weight * np.asarray(frontier, dtype=float)
         team = len(self.frontiers - frozenset(next_frontiers)) / TEAM_FRONTIER_NORMALIZER - 0.5
         terminal = 10. if terminated else 0.
         # Columns make the actual reward calculation inspectable in Replay.

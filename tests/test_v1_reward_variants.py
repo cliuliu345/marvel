@@ -118,6 +118,17 @@ def test_finish_rewards_variants():
         snapshot.finish_rewards(individual, set(), False, scan_shares=shares)
     with pytest.raises(ValueError):
         snapshot.finish_rewards(individual, set(), False, variant='nope')
+    # The weight scales only the individual column, for every variant.
+    for variant, extra in (('legacy', {}), ('no_traj', {}), ('scan_share', dict(scan_shares=shares))):
+        _, base = snapshot.finish_rewards(individual, {(3., 0.)}, False, variant=variant, **extra)
+        rewards, weighted = snapshot.finish_rewards(individual, {(3., 0.)}, False, variant=variant,
+                                                    individual_weight=4., **extra)
+        np.testing.assert_allclose(weighted[:, 0], 4. * base[:, 0])
+        np.testing.assert_allclose(weighted[:, 1:], base[:, 1:])
+        np.testing.assert_allclose(rewards, weighted.sum(-1))
+    for bad in (0., -1., float('nan')):
+        with pytest.raises(ValueError):
+            snapshot.finish_rewards(individual, set(), False, individual_weight=bad)
 
 
 def test_profile_normalizers():
@@ -163,6 +174,26 @@ def test_scan_share_smoke_and_discounted_bellman():
         targets = learner.bellman_targets(batch)
     next_value = 2 + learner.log_alpha.exp().detach() * valid.sum(-1, keepdim=True).float().log()
     torch.testing.assert_close(targets, batch.rewards + 0.99 * next_value)
+
+
+def test_individual_weight_smoke_and_resume_check(tmp_path):
+    torch = pytest.importorskip('torch')
+    import driver_v1
+    from parameter import SCAN_SHARE_NORMALIZER
+    parse = driver_v1.build_parser().parse_args
+    common = ['--max-steps', '2', '--joint-batch-size', '1', '--updates-per-episode', '1',
+              '--warmup-agent-samples', '0', '--reward', 'scan_share', '--gamma', '0.99']
+    _, replay, _, metrics = driver_v1.run(parse(['--episodes', '1', '--start-episode', '7',
+                                                 '--individual-weight', '4', '--checkpoint-out',
+                                                 str(tmp_path / 'latest.pth'), *common]))
+    episode = metrics[0]
+    assert episode['individual_weight'] == 4.0 and episode['scan_unattributed_cells'] == 0
+    individual = sum(episode['agent_reward_components']['individual'])
+    assert np.isclose(individual * SCAN_SHARE_NORMALIZER, 4 * episode['scan_new_cells'])
+    saved = torch.load(tmp_path / 'latest.pth', weights_only=False)
+    assert saved['individual_weight'] == 4.0
+    with pytest.raises(ValueError, match='Resume configuration'):
+        driver_v1.run(parse(['--resume', str(tmp_path / 'latest.pth'), '--episodes', '1', *common]))
 
 
 def test_no_traj_smoke():

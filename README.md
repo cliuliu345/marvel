@@ -233,6 +233,13 @@ MARVEL_SENSOR_PROFILE=compact python driver_v1.py --reward no_traj --gamma 0.99 
 MARVEL_SENSOR_PROFILE=compact python driver_v1.py --reward scan_share --gamma 0.99 ...
 ```
 
+`--individual-weight W` multiplies the individual column (default 1; stored in
+checkpoints and checked on resume). SAC's entropy bonus is fixed in reward
+units, and scan shares are only ~0.1 per step: on the original maps a
+`scan_share` run with W=1 kept entropy near 3.0 (legacy: ~2.0) and learned far
+more slowly. The total individual reward per episode is bounded by the map's
+cells, so a larger W cannot be farmed by stalling.
+
 ### V1 motion rule
 
 `--motion-rule legacy` (default) keeps MARVEL's execution rules, which can move

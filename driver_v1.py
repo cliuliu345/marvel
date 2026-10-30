@@ -82,6 +82,8 @@ def build_parser():
                         help='Reward variant, see utils/v1_rewards.py (default: legacy)')
     parser.add_argument('--gamma', type=float, default=GAMMA,
                         help='SAC discount (default: parameter.GAMMA = 1)')
+    parser.add_argument('--individual-weight', type=float, default=1.0,
+                        help='Multiplier on the individual reward term (default: 1)')
     parser.add_argument('--motion-rule', default='legacy', choices=('legacy', 'safe'),
                         help='legacy: MARVEL conflict/edge rules (can pass through walls); '
                              'safe: symmetric edge checks and legal-neighbour conflict replacement')
@@ -91,6 +93,7 @@ def build_parser():
 def run_config(args):
     import parameter
     return dict(reward_variant=args.reward, gamma=float(args.gamma), motion_rule=args.motion_rule,
+                individual_weight=float(args.individual_weight),
                 sensor_profile=parameter.SENSOR_PROFILE,
                 sensor_capabilities=[list(c) for c in parameter.EPISODE_SENSOR_CAPABILITIES],
                 utility_range=parameter.UTILITY_RANGE, team_frontier_normalizer=parameter.TEAM_FRONTIER_NORMALIZER,
@@ -101,7 +104,8 @@ def check_resume_config(checkpoint, config):
     # Checkpoints from before these fields existed were legacy / GAMMA=1 runs.
     saved = dict(reward_variant=checkpoint.get('reward_variant', 'legacy'),
                  gamma=float(checkpoint.get('gamma', 1.0)),
-                 motion_rule=checkpoint.get('motion_rule', 'legacy'))
+                 motion_rule=checkpoint.get('motion_rule', 'legacy'),
+                 individual_weight=float(checkpoint.get('individual_weight', 1.0)))
     if 'sensor_profile' in checkpoint:
         saved['sensor_profile'] = checkpoint['sensor_profile']
     mismatched = {key: (value, config[key]) for key, value in saved.items() if config[key] != value}
@@ -149,6 +153,8 @@ def _run(args, writer):
         raise ValueError('Periodic evaluation is only available during training')
     if not 0 < args.gamma <= 1:
         raise ValueError('--gamma must be in (0, 1]')
+    if not args.individual_weight > 0:
+        raise ValueError('--individual-weight must be positive')
     config = run_config(args)
     print('V1_CONFIG ' + json.dumps(config), flush=True)
     random.seed(args.seed)
@@ -183,7 +189,8 @@ def _run(args, writer):
                           gif_frame_duration=args.gif_frame_duration,
                           stagnation_recovery=args.stagnation_recovery,
                           stagnation_recovery_episodes=0 if args.evaluate else args.stagnation_recovery_episodes,
-                          reward_variant=args.reward, motion_rule=args.motion_rule)
+                          reward_variant=args.reward, motion_rule=args.motion_rule,
+                          individual_weight=args.individual_weight)
     run_dir = None
     if args.save_gif_every or args.eval_every:
         root = Path(args.gif_dir).expanduser().resolve()
@@ -205,7 +212,7 @@ def _run(args, writer):
         payload = dict(learner.checkpoint(), next_episode=next_episode,
                        failed_episodes=failed_episodes, processed_episodes=processed_episodes,
                        reward_variant=args.reward, motion_rule=args.motion_rule,
-                       sensor_profile=config['sensor_profile'], run_config=config)
+                       individual_weight=float(args.individual_weight), sensor_profile=config['sensor_profile'], run_config=config)
         atomic_checkpoint(payload, path.parent / 'latest.pth')
         if episode is not None:
             atomic_checkpoint(payload, path.parent / f'ep{episode}.pth')

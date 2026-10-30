@@ -29,6 +29,7 @@ class V1Worker(MultiAgentWorker):
         self.diagnostic_policy = diagnostic_policy
         self.decision_records = []
         self.reward_variant, self.scan_tracker, self.motion_rule = 'legacy', None, 'legacy'
+        self.individual_weight = 1.0
         self.episode_components = np.zeros((len(self.robot_list), len(COMPONENT_NAMES)))
         self.max_steps = max_steps
         self.record_joint = record_joint
@@ -54,10 +55,13 @@ class V1Worker(MultiAgentWorker):
                                              filename_prefix=gif_prefix, frame_mode=gif_frame_mode,
                                              frame_duration=gif_frame_duration)
 
-    def configure_reward(self, variant):
+    def configure_reward(self, variant, individual_weight=1.0):
         """Select the reward variant before run_episode; see utils/v1_rewards.py."""
         if variant not in REWARD_VARIANTS:
             raise ValueError(f'Unknown V1 reward variant {variant!r}')
+        if not (np.isfinite(individual_weight) and individual_weight > 0):
+            raise ValueError('Individual reward weight must be positive')
+        self.individual_weight = float(individual_weight)
         if self.completed_steps or self.scan_tracker is not None:
             raise RuntimeError('Configure the reward once, before the episode starts')
         from parameter import SCAN_SHARE_NORMALIZER
@@ -75,6 +79,7 @@ class V1Worker(MultiAgentWorker):
             by_type[key] = {name: float(self.episode_components[rows, i].mean())
                             for i, name in enumerate(COMPONENT_NAMES)}
         metrics = dict(reward_variant=self.reward_variant, motion_rule=self.motion_rule,
+                       individual_weight=self.individual_weight,
                        agent_capabilities=[list(c) for c in self.sensor_capabilities],
                        agent_reward_components=per_agent, reward_components_by_type=by_type)
         if self.scan_tracker is not None:
@@ -253,7 +258,8 @@ class V1Worker(MultiAgentWorker):
             self.env.done = terminated
             shares = None if self.scan_tracker is None else self.scan_tracker.finish(self.env.robot_belief)
             rewards, components = reward_snapshot.finish_rewards(individual, self.node_manager.global_frontiers, terminated,
-                                                                 variant=self.reward_variant, scan_shares=shares)
+                                                                 variant=self.reward_variant, scan_shares=shares,
+                                                                 individual_weight=self.individual_weight)
             self.episode_returns += rewards
             self.episode_components += components
             # Nonterminal next commands are sampled ONCE and used unchanged at

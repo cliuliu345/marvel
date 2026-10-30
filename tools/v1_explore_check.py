@@ -51,8 +51,8 @@ def summarize(rows):
                 error_count=len(rows)-len(valid), errors=errors, **aggregate_behavior(valid))
 
 
-def check_one(weights, directory, name, episode, worker_id, seed, policy, recovery,
-              gif_dir=None, gif_frame_every=1, gif_frame_mode='substep', gif_frame_duration=None, motion_rule='legacy'):
+def check_one(weights, directory, name, episode, worker_id, seed, policy, recovery, motion_rule='legacy',
+              gif_dir=None, gif_frame_every=1, gif_frame_mode='substep', gif_frame_duration=None):
     os.environ['OMP_NUM_THREADS'] = '1'
     torch.set_num_threads(1)
     # Reproducible action RNG, independent of Ray task completion order.
@@ -129,8 +129,8 @@ def main(argv=None):
         gif_run_dir = tempfile.mkdtemp(prefix=f'run_{stamp}_', dir=args.gif_dir)
     manifest = dict(vars(args), gif_run_dir=gif_run_dir, selected_maps=[dict(map_path=os.path.join(args.maps, name),
                     episode=ep, worker_id=i % args.workers) for i, (name, ep) in enumerate(selected)])
-    jobs = [(weights, args.maps, name, ep, i % args.workers, args.seed, args.policy, args.recovery,
-             gif_run_dir, args.gif_frame_every, args.gif_frame_mode, args.gif_frame_duration, args.motion_rule)
+    jobs = [(weights, args.maps, name, ep, i % args.workers, args.seed, args.policy, args.recovery, args.motion_rule,
+             gif_run_dir, args.gif_frame_every, args.gif_frame_mode, args.gif_frame_duration)
             for i, (name, ep) in enumerate(selected)]
     rows, failures = {}, []
     started = time.perf_counter()

@@ -72,12 +72,15 @@ class V1Runner(Runner):
     def __init__(self, meta_agent_id, max_steps=MAX_EPISODE_STEP, record_joint=True,
                  greedy=False, map_directory='maps_medium', save_gif_every=0,
                  gif_dir=None, gif_frame_every=1, stagnation_recovery=False, stagnation_recovery_episodes=0, diagnostic_policy=None, gif_prefix='',
-                 gif_frame_mode='substep', gif_frame_duration=None, reward_variant='legacy', motion_rule='legacy'):
+                 gif_frame_mode='substep', gif_frame_duration=None, reward_variant='legacy', motion_rule='legacy', individual_weight=1.0):
         from utils.model import CapabilityConditionedActor
         from utils.v1_rewards import REWARD_VARIANTS
         if reward_variant not in REWARD_VARIANTS:
             raise ValueError(f'Unknown V1 reward variant {reward_variant!r}')
         self.reward_variant = reward_variant
+        if not individual_weight > 0:
+            raise ValueError('Individual reward weight must be positive')
+        self.individual_weight = float(individual_weight)
         if motion_rule not in ('legacy', 'safe'):
             raise ValueError(f'Unknown motion rule {motion_rule!r}')
         self.motion_rule = motion_rule
@@ -132,7 +135,7 @@ class V1Runner(Runner):
                           gif_frame_duration=self.gif_frame_duration,
                           stagnation_recovery=(self.stagnation_recovery or
                                                episode_number < self.stagnation_recovery_episodes))
-        worker.configure_reward(self.reward_variant)
+        worker.configure_reward(self.reward_variant, self.individual_weight)
         worker.configure_motion(self.motion_rule)
         worker.run_episode()
         return worker.joint_transitions, worker.perf_metrics
@@ -151,7 +154,8 @@ class V1Runner(Runner):
                                   gif_prefix=f'eval_train{training_episodes:06d}_',
                                    gif_frame_every=self.gif_frame_every, gif_frame_mode=self.gif_frame_mode,
                                    gif_frame_duration=self.gif_frame_duration,
-                                  reward_variant=self.reward_variant, motion_rule=self.motion_rule)
+                                  reward_variant=self.reward_variant, motion_rule=self.motion_rule,
+                                  individual_weight=self.individual_weight)
                 return runner.job(weights_set, index, map_path=map_path)
             except Exception as error:
                 return [], {}, episode_error_info(error, 100000 + index, index,
