@@ -175,7 +175,9 @@ def test_no_traj_smoke():
 def test_legacy_default_records_variant():
     _, _, (learner, _, _, metrics) = _smoke()
     assert learner.gamma == 1.0 and metrics[0]['reward_variant'] == 'legacy'
-    assert set(metrics[0]['reward_components_by_type']) == {'180deg_8m', '70deg_15m'}
+    from parameter import EPISODE_SENSOR_CAPABILITIES
+    expected = {f'{fov:g}deg_{sensor_range:g}m' for fov, sensor_range in EPISODE_SENSOR_CAPABILITIES}
+    assert set(metrics[0]['reward_components_by_type']) == expected
 
 
 def test_resume_rejects_changed_reward_or_gamma(tmp_path):
