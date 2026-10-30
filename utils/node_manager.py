@@ -341,7 +341,7 @@ class Node:
                         continue
                     else:
                         neighbor_node = neighbor_node.data
-                        collision = check_collision(self.coords, neighbor_coords, updating_map_info)
+                        collision = edge_blocked(self.coords, neighbor_coords, updating_map_info)
                         neighbor_matrix_x = center_index + (center_index - i)
                         neighbor_matrix_y = center_index + (center_index - j)
                         if not collision:

@@ -169,6 +169,26 @@ def check_collision(start, end, map_info):
     return check_collision_cells(start_cell, end_cell, map_info.map, OCCUPIED, UNKNOWN)
 
 
+# Graph edges are created once, from whichever endpoint is processed first,
+# and then flown in both directions. The 4-connected raster line from A to B
+# can differ from B to A, so a diagonal that grazes a wall end at a corner may
+# be clear one way and blocked the other. With SYMMETRIC_EDGE_CHECK (set per
+# process by V1Runner for --motion-rule safe) an edge needs both directions
+# clear. False keeps the original MARVEL graph.
+SYMMETRIC_EDGE_CHECK = False
+
+
+def set_symmetric_edge_check(enabled):
+    global SYMMETRIC_EDGE_CHECK
+    SYMMETRIC_EDGE_CHECK = bool(enabled)
+
+
+def edge_blocked(start, end, map_info):
+    if check_collision(start, end, map_info):
+        return True
+    return SYMMETRIC_EDGE_CHECK and check_collision(end, start, map_info)
+
+
 def make_gif(path, n, frame_files, rate, *, frame_duration=None):
     # Public opt-in timing is in seconds; the modern Pillow plugin needs ms.
     # Retain the legacy writer defaults for callers that do not opt in.

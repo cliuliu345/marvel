@@ -232,3 +232,18 @@ per-UAV and per-sensor-type component sums, and for `scan_share`
 MARVEL_SENSOR_PROFILE=compact python driver_v1.py --reward no_traj --gamma 0.99 ...
 MARVEL_SENSOR_PROFILE=compact python driver_v1.py --reward scan_share --gamma 0.99 ...
 ```
+
+### V1 motion rule
+
+`--motion-rule legacy` (default) keeps MARVEL's execution rules, which can move
+a UAV through walls in two ways: (1) a goal conflict is resolved with the
+nearest unoccupied node among the 25 nearest to the goal, which need not be a
+graph neighbour or in line of sight (`conflict_nonadjacent`), and the motion
+is a straight interpolation; (2) graph edges are collision-checked from one
+endpoint only, and the 4-connected raster line can be clear from A to B but
+blocked from B to A where a wall ends at a corner. `--motion-rule safe`
+replaces a conflicting goal only with the UAV's own legal neighbour nodes
+(nearest to the original goal), else keeps it in place, and requires edges to
+be clear in both directions, for the Belief and the Ground-Truth graphs. Use it
+for all new experiments; it is stored in checkpoints and checked on resume.
+`tools/v1_explore_check.py` accepts the same option.

@@ -82,12 +82,16 @@ def build_parser():
                         help='Reward variant, see utils/v1_rewards.py (default: legacy)')
     parser.add_argument('--gamma', type=float, default=GAMMA,
                         help='SAC discount (default: parameter.GAMMA = 1)')
+    parser.add_argument('--motion-rule', default='legacy', choices=('legacy', 'safe'),
+                        help='legacy: MARVEL conflict/edge rules (can pass through walls); '
+                             'safe: symmetric edge checks and legal-neighbour conflict replacement')
     return parser
 
 
 def run_config(args):
     import parameter
-    return dict(reward_variant=args.reward, gamma=float(args.gamma), sensor_profile=parameter.SENSOR_PROFILE,
+    return dict(reward_variant=args.reward, gamma=float(args.gamma), motion_rule=args.motion_rule,
+                sensor_profile=parameter.SENSOR_PROFILE,
                 sensor_capabilities=[list(c) for c in parameter.EPISODE_SENSOR_CAPABILITIES],
                 utility_range=parameter.UTILITY_RANGE, team_frontier_normalizer=parameter.TEAM_FRONTIER_NORMALIZER,
                 scan_share_normalizer=parameter.SCAN_SHARE_NORMALIZER)
@@ -96,7 +100,8 @@ def run_config(args):
 def check_resume_config(checkpoint, config):
     # Checkpoints from before these fields existed were legacy / GAMMA=1 runs.
     saved = dict(reward_variant=checkpoint.get('reward_variant', 'legacy'),
-                 gamma=float(checkpoint.get('gamma', 1.0)))
+                 gamma=float(checkpoint.get('gamma', 1.0)),
+                 motion_rule=checkpoint.get('motion_rule', 'legacy'))
     if 'sensor_profile' in checkpoint:
         saved['sensor_profile'] = checkpoint['sensor_profile']
     mismatched = {key: (value, config[key]) for key, value in saved.items() if config[key] != value}
@@ -178,7 +183,7 @@ def _run(args, writer):
                           gif_frame_duration=args.gif_frame_duration,
                           stagnation_recovery=args.stagnation_recovery,
                           stagnation_recovery_episodes=0 if args.evaluate else args.stagnation_recovery_episodes,
-                          reward_variant=args.reward)
+                          reward_variant=args.reward, motion_rule=args.motion_rule)
     run_dir = None
     if args.save_gif_every or args.eval_every:
         root = Path(args.gif_dir).expanduser().resolve()
@@ -199,7 +204,8 @@ def _run(args, writer):
         path = Path(args.checkpoint_out)
         payload = dict(learner.checkpoint(), next_episode=next_episode,
                        failed_episodes=failed_episodes, processed_episodes=processed_episodes,
-                       reward_variant=args.reward, sensor_profile=config['sensor_profile'], run_config=config)
+                       reward_variant=args.reward, motion_rule=args.motion_rule,
+                       sensor_profile=config['sensor_profile'], run_config=config)
         atomic_checkpoint(payload, path.parent / 'latest.pth')
         if episode is not None:
             atomic_checkpoint(payload, path.parent / f'ep{episode}.pth')

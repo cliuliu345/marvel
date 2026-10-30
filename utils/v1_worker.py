@@ -28,7 +28,7 @@ class V1Worker(MultiAgentWorker):
             raise ValueError('Rule policies are only available for diagnostic evaluation')
         self.diagnostic_policy = diagnostic_policy
         self.decision_records = []
-        self.reward_variant, self.scan_tracker = 'legacy', None
+        self.reward_variant, self.scan_tracker, self.motion_rule = 'legacy', None, 'legacy'
         self.episode_components = np.zeros((len(self.robot_list), len(COMPONENT_NAMES)))
         self.max_steps = max_steps
         self.record_joint = record_joint
@@ -74,7 +74,7 @@ class V1Worker(MultiAgentWorker):
             key = f'{capability[0]:g}deg_{capability[1]:g}m'
             by_type[key] = {name: float(self.episode_components[rows, i].mean())
                             for i, name in enumerate(COMPONENT_NAMES)}
-        metrics = dict(reward_variant=self.reward_variant,
+        metrics = dict(reward_variant=self.reward_variant, motion_rule=self.motion_rule,
                        agent_capabilities=[list(c) for c in self.sensor_capabilities],
                        agent_reward_components=per_agent, reward_components_by_type=by_type)
         if self.scan_tracker is not None:
@@ -120,6 +120,29 @@ class V1Worker(MultiAgentWorker):
             self.min_valid_actions = minimum if self.min_valid_actions is None else min(self.min_valid_actions, minimum)
         return JointState(observations, critics, context)
 
+    def configure_motion(self, rule):
+        """'legacy': MARVEL's nearest-25 conflict replacement. 'safe': replace only
+        with the agent's own legal neighbour nodes, else stay (see resolve_goals).
+        The matching symmetric edge rule is set by V1Runner before construction."""
+        if rule not in ('legacy', 'safe'):
+            raise ValueError(f'Unknown motion rule {rule!r}')
+        self.motion_rule = rule
+
+    @staticmethod
+    def safe_replacement(table, selected, current, occupied):
+        """Nearest unoccupied legal neighbour to the selected goal, else stay, else None.
+
+        Legal neighbours are the Actor table's valid nodes, i.e. graph edges that
+        were collision-checked; ties break by distance from the current node,
+        then by coordinates, so the result is deterministic.
+        """
+        legal = table.node_coordinates[0, table.valid_mask[0]].cpu().numpy()
+        free = [c for c in np.unique(legal, axis=0) if tuple(c) not in occupied]
+        if free:
+            return min(free, key=lambda c: (float(np.linalg.norm(c - selected)),
+                                            float(np.linalg.norm(c - current)), tuple(c)))
+        return None if tuple(current) in occupied else current
+
     def resolve_goals(self, context):
         # Same nearest-node/arrival-order conflict rule as MultiAgentWorker.
         goals = context.commanded_coordinates.cpu().numpy().copy()
@@ -128,6 +151,16 @@ class V1Worker(MultiAgentWorker):
         ordered = goals[sequence].copy()
         for row, selected in enumerate(ordered):
             occupied = set(map(tuple, ordered[:row]))
+            if tuple(selected) in occupied and getattr(self, 'motion_rule', 'legacy') == 'safe':
+                index = int(sequence[row])
+                current = context.current_coordinates[index].cpu().numpy()
+                replacement = self.safe_replacement(context.action_tables[index], selected, current, occupied)
+                if replacement is None:
+                    raise RuntimeError('No distinct legal execution goal available for conflict resolution')
+                ordered[row] = goals[index] = replacement
+                self.perf_metrics['conflict_replacements'] += 1
+                self.perf_metrics['conflict_stay'] += int(np.array_equal(replacement, current))
+                continue
             if tuple(selected) in occupied:
                 agent_id = int(context.agent_ids[sequence[row]])
                 nearby = self.robot_list[agent_id].node_manager.nodes_dict.nearest_neighbors(selected.tolist(), 25)

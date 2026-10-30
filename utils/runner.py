@@ -72,12 +72,15 @@ class V1Runner(Runner):
     def __init__(self, meta_agent_id, max_steps=MAX_EPISODE_STEP, record_joint=True,
                  greedy=False, map_directory='maps_medium', save_gif_every=0,
                  gif_dir=None, gif_frame_every=1, stagnation_recovery=False, stagnation_recovery_episodes=0, diagnostic_policy=None, gif_prefix='',
-                 gif_frame_mode='substep', gif_frame_duration=None, reward_variant='legacy'):
+                 gif_frame_mode='substep', gif_frame_duration=None, reward_variant='legacy', motion_rule='legacy'):
         from utils.model import CapabilityConditionedActor
         from utils.v1_rewards import REWARD_VARIANTS
         if reward_variant not in REWARD_VARIANTS:
             raise ValueError(f'Unknown V1 reward variant {reward_variant!r}')
         self.reward_variant = reward_variant
+        if motion_rule not in ('legacy', 'safe'):
+            raise ValueError(f'Unknown motion rule {motion_rule!r}')
+        self.motion_rule = motion_rule
         self.meta_agent_id = meta_agent_id
         self.device = torch.device('cuda') if USE_GPU else torch.device('cpu')
         if diagnostic_policy not in (None, 'guidepost', 'random_uniform') or (diagnostic_policy and record_joint):
@@ -116,6 +119,9 @@ class V1Runner(Runner):
 
     def do_job(self, episode_number, map_path=None):
         from utils.v1_worker import V1Worker
+        from utils.utils import set_symmetric_edge_check
+        # Graphs (including the GT graph) are built during construction.
+        set_symmetric_edge_check(self.motion_rule == 'safe')
         save_gif = self.save_gif_every > 0 and episode_number % self.save_gif_every == 0
         worker = V1Worker(self.meta_agent_id, self.network, episode_number, device=self.device,
                           max_steps=self.max_steps, record_joint=self.record_joint,
@@ -127,6 +133,7 @@ class V1Runner(Runner):
                           stagnation_recovery=(self.stagnation_recovery or
                                                episode_number < self.stagnation_recovery_episodes))
         worker.configure_reward(self.reward_variant)
+        worker.configure_motion(self.motion_rule)
         worker.run_episode()
         return worker.joint_transitions, worker.perf_metrics
 
@@ -144,7 +151,7 @@ class V1Runner(Runner):
                                   gif_prefix=f'eval_train{training_episodes:06d}_',
                                    gif_frame_every=self.gif_frame_every, gif_frame_mode=self.gif_frame_mode,
                                    gif_frame_duration=self.gif_frame_duration,
-                                  reward_variant=self.reward_variant)
+                                  reward_variant=self.reward_variant, motion_rule=self.motion_rule)
                 return runner.job(weights_set, index, map_path=map_path)
             except Exception as error:
                 return [], {}, episode_error_info(error, 100000 + index, index,

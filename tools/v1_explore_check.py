@@ -52,7 +52,7 @@ def summarize(rows):
 
 
 def check_one(weights, directory, name, episode, worker_id, seed, policy, recovery,
-              gif_dir=None, gif_frame_every=1, gif_frame_mode='substep', gif_frame_duration=None):
+              gif_dir=None, gif_frame_every=1, gif_frame_mode='substep', gif_frame_duration=None, motion_rule='legacy'):
     os.environ['OMP_NUM_THREADS'] = '1'
     torch.set_num_threads(1)
     # Reproducible action RNG, independent of Ray task completion order.
@@ -67,7 +67,8 @@ def check_one(weights, directory, name, episode, worker_id, seed, policy, recove
                           save_gif_every=1 if gif_dir is not None else 0, gif_dir=gif_dir,
                           gif_frame_every=gif_frame_every, gif_frame_mode=gif_frame_mode,
                           gif_frame_duration=gif_frame_duration,
-                          diagnostic_policy=policy if policy in ('guidepost', 'random_uniform') else None)
+                          diagnostic_policy=policy if policy in ('guidepost', 'random_uniform') else None,
+                          motion_rule=motion_rule)
         transitions, metrics, info = runner.job([weights], episode, map_path=os.path.join(directory, name))
         assert not transitions
         if info.get('error'):
@@ -94,6 +95,7 @@ def main(argv=None):
     parser.add_argument('--policy', choices=('sample', 'greedy', 'guidepost', 'random_uniform'), default='sample')
     parser.add_argument('--recovery', choices=('off', 'on'), default='off')
     parser.add_argument('--workers', type=int, default=6)
+    parser.add_argument('--motion-rule', choices=('legacy', 'safe'), default='legacy')
     parser.add_argument('--gif-dir', help='Optional GIF root; creates a unique run directory')
     parser.add_argument('--gif-frame-every', type=int, default=1)
     parser.add_argument('--gif-frame-mode', choices=('substep', 'macro'), default='substep')
@@ -128,7 +130,7 @@ def main(argv=None):
     manifest = dict(vars(args), gif_run_dir=gif_run_dir, selected_maps=[dict(map_path=os.path.join(args.maps, name),
                     episode=ep, worker_id=i % args.workers) for i, (name, ep) in enumerate(selected)])
     jobs = [(weights, args.maps, name, ep, i % args.workers, args.seed, args.policy, args.recovery,
-             gif_run_dir, args.gif_frame_every, args.gif_frame_mode, args.gif_frame_duration)
+             gif_run_dir, args.gif_frame_every, args.gif_frame_mode, args.gif_frame_duration, args.motion_rule)
             for i, (name, ep) in enumerate(selected)]
     rows, failures = {}, []
     started = time.perf_counter()
@@ -171,6 +173,7 @@ def main(argv=None):
                 ray.shutdown()
     ordered = [rows[i] for i in range(len(jobs))]
     summary = dict(summarize(ordered), policy=args.policy, recovery=args.recovery, seed=args.seed,
+                   motion_rule=args.motion_rule,
                    random_actor=not rule and args.checkpoint is None, wall_seconds=time.perf_counter()-started)
     output.with_suffix('.json').write_text(json.dumps(dict(summary=summary, manifest=manifest,
                                                           rows=ordered, failures=failures), indent=2))
