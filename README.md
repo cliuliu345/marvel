@@ -193,7 +193,11 @@ counts, zone shares and per-family sight lines and visible areas.
 
 `MARVEL_SENSOR_PROFILE=compact` (or `SENSOR_PROFILE` in `parameter.py`)
 switches to sensors (180 deg, 6 m) x2 and (45 deg, 12 m) x2, `SENSOR_RANGE` 12,
-`INITIAL_SCAN_RANGE` 6 and `FRONTIER_REPRESENTATION_RANGE` 16. The default
+`INITIAL_SCAN_RANGE` 6, `FRONTIER_REPRESENTATION_RANGE` 16 and `UTILITY_RANGE`
+5.4 (0.9 x the shortest range). The shared node utility drives the guidepost
+feature, so it must not exceed what the shortest-range UAV can see: with 10.8,
+guidepost sent 6 m UAVs to frontiers they could not observe and solved 0/20
+test maps; with 5.4 it solved 18/20 (98.2% mean coverage). The default
 `marvel` profile is unchanged. Before long runs, calibrate on the new maps:
 `TEAM_FRONTIER_NORMALIZER` (39, from the original 10 m range) should match the
 mean frontier cells removed per macro step, and `tools/v1_explore_check.py`

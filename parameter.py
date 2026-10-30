@@ -43,9 +43,9 @@ N_AGENTS = 4
 SENSOR_PROFILE = _os.environ.get('MARVEL_SENSOR_PROFILE', 'marvel')
 _SENSOR_PROFILES = {
     'marvel': dict(capabilities=((180.0, 8.0), (180.0, 8.0), (70.0, 15.0), (70.0, 15.0)),
-                   sensor_range=10, initial_scan_range=10.0, frontier_range=20.0),
+                   sensor_range=10, initial_scan_range=10.0, frontier_range=20.0, utility_range=9.0),
     'compact': dict(capabilities=((180.0, 6.0), (180.0, 6.0), (45.0, 12.0), (45.0, 12.0)),
-                    sensor_range=12, initial_scan_range=6.0, frontier_range=16.0),
+                    sensor_range=12, initial_scan_range=6.0, frontier_range=16.0, utility_range=5.4),
 }
 if SENSOR_PROFILE not in _SENSOR_PROFILES:
     raise ValueError(f'Unknown MARVEL_SENSOR_PROFILE {SENSOR_PROFILE!r}; use one of {sorted(_SENSOR_PROFILES)}')
@@ -85,7 +85,11 @@ UNKNOWN = 127
 # Must equal the LONGEST physical range: it sets the graph refresh radius,
 # UTILITY_RANGE and UPDATING_MAP_SIZE used by every agent.
 SENSOR_RANGE = _PROFILE['sensor_range']  # meter
-UTILITY_RANGE = 0.9 * SENSOR_RANGE
+# Shared legacy node utility: decides which nodes the guidepost (an Actor and
+# Critic input) points to. It must not exceed 0.9 x the SHORTEST range, or
+# the guidepost sends short-range UAVs to frontiers they cannot see. marvel
+# keeps 0.9 * SENSOR_RANGE = 9.0; compact uses 0.9 * 6 = 5.4.
+UTILITY_RANGE = _PROFILE['utility_range']
 MIN_UTILITY = 1
 
 # updating map range w.r.t the robot

@@ -91,18 +91,21 @@ class SensorProfileTests(unittest.TestCase):
     def _profile(self, name):
         env = dict(os.environ, MARVEL_SENSOR_PROFILE=name)
         code = ('import json, parameter as p; print(json.dumps([p.EPISODE_SENSOR_CAPABILITIES, p.SENSOR_RANGE, '
-                'p.INITIAL_SCAN_RANGE, p.FRONTIER_REPRESENTATION_RANGE, p.TEAM_FRONTIER_NORMALIZER]))')
+                'p.INITIAL_SCAN_RANGE, p.FRONTIER_REPRESENTATION_RANGE, p.TEAM_FRONTIER_NORMALIZER, p.UTILITY_RANGE]))')
         result = subprocess.run([sys.executable, '-c', code], cwd=ROOT, env=env, capture_output=True, text=True)
         return result
 
     def test_default_profile_is_unchanged(self):
-        caps, sensor_range, initial, frontier, normalizer = json.loads(self._profile('marvel').stdout)
+        caps, sensor_range, initial, frontier, normalizer, utility = json.loads(self._profile('marvel').stdout)
         self.assertEqual(caps, [[180.0, 8.0], [180.0, 8.0], [70.0, 15.0], [70.0, 15.0]])
         self.assertEqual((sensor_range, initial, frontier, normalizer), (10, 10.0, 20.0, 39.0))
+        self.assertAlmostEqual(utility, 0.9 * sensor_range)
 
     def test_compact_profile(self):
-        caps, sensor_range, initial, frontier, _ = json.loads(self._profile('compact').stdout)
+        caps, sensor_range, initial, frontier, _, utility = json.loads(self._profile('compact').stdout)
         self.assertEqual(sensor_range, max(r for _, r in caps))
+        # Guidepost targets must be visible to every UAV type.
+        self.assertAlmostEqual(utility, 0.9 * min(r for _, r in caps))
         self.assertLessEqual(initial, min(r for _, r in caps))
         self.assertGreaterEqual(frontier, sensor_range)
         areas = {round(f / 360 * np.pi * r ** 2, 1) for f, r in caps}
