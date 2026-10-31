@@ -254,3 +254,18 @@ replaces a conflicting goal only with the UAV's own legal neighbour nodes
 be clear in both directions, for the Belief and the Ground-Truth graphs. Use it
 for all new experiments; it is stored in checkpoints and checked on resume.
 `tools/v1_explore_check.py` accepts the same option.
+
+### Comparison runs: generalist team and capability-blind ablation
+
+`MARVEL_SENSOR_PROFILE=generalist` is a homogeneous team of four 90 deg / 8.5 m
+sensors. It has the same total nominal sensing area as `compact` (4 x ~56.5
+m^2) and identical graph, frontier, initial-scan and scan-share settings; only
+the sensors differ, plus `UTILITY_RANGE`, which follows the same rule
+(0.9 x the team's shortest range = 7.65 m).
+
+`--capability-blind` trains the same Actor and Critics with the explicit
+self and teammate [FoV, range] inputs zeroed inside the networks (a
+`capability_mask` buffer that travels with the weights). Candidate headings
+still come from each UAV's real sensor, and observations are unchanged. It is
+stored in checkpoints and checked on resume; evaluation takes it from the
+checkpoint.

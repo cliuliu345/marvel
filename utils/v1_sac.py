@@ -24,7 +24,7 @@ def discrete_expectation(probabilities, logp, q_values, valid, alpha):
 
 
 class V1SACLearner:
-    def __init__(self, device='cpu', gamma=GAMMA):
+    def __init__(self, device='cpu', gamma=GAMMA, capability_blind=False):
         if not 0 < gamma <= 1:
             raise ValueError('Discount must be in (0, 1]')
         self.gamma = float(gamma)
@@ -32,6 +32,9 @@ class V1SACLearner:
         self.actor = CapabilityConditionedActor().to(self.device)
         self.q1 = CapabilityConditionedCritic().to(self.device)
         self.q2 = CapabilityConditionedCritic().to(self.device)
+        self.capability_blind = bool(capability_blind)
+        for model in (self.actor, self.q1, self.q2):
+            model.set_capability_blind(self.capability_blind)
         self.target_q1 = deepcopy(self.q1).eval().requires_grad_(False)
         self.target_q2 = deepcopy(self.q2).eval().requires_grad_(False)
         self.log_alpha = nn.Parameter(torch.tensor([-2.], device=self.device))
@@ -114,7 +117,7 @@ class V1SACLearner:
                     log_alpha=self.log_alpha.detach().clone(), policy_optimizer=self.actor_optimizer.state_dict(),
                     q_net1_optimizer=self.q1_optimizer.state_dict(), q_net2_optimizer=self.q2_optimizer.state_dict(),
                     log_alpha_optimizer=self.alpha_optimizer.state_dict(), updates=self.updates,
-                    gamma=self.gamma)
+                    gamma=self.gamma, capability_blind=self.capability_blind)
 
     def load_checkpoint(self, checkpoint):
         if checkpoint.get('format') != 'marvel-heterogeneous-v1':
@@ -131,3 +134,7 @@ class V1SACLearner:
                                 (self.q2_optimizer, 'q_net2_optimizer'), (self.alpha_optimizer, 'log_alpha_optimizer')):
             optimizer.load_state_dict(checkpoint[name])
         self.updates = checkpoint['updates']
+        loaded = [model.capability_blind for model in (self.actor, self.q1, self.q2, self.target_q1, self.target_q2)]
+        if any(blind != self.capability_blind for blind in loaded):
+            raise ValueError(f'Checkpoint capability_blind={loaded} differs from --capability-blind '
+                             f'{self.capability_blind}')

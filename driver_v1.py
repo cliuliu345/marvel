@@ -84,6 +84,8 @@ def build_parser():
                         help='SAC discount (default: parameter.GAMMA = 1)')
     parser.add_argument('--individual-weight', type=float, default=1.0,
                         help='Multiplier on the individual reward term (default: 1)')
+    parser.add_argument('--capability-blind', action='store_true',
+                        help='Ablation: hide explicit self/teammate capability inputs from Actor and Critics')
     parser.add_argument('--motion-rule', default='legacy', choices=('legacy', 'safe'),
                         help='legacy: MARVEL conflict/edge rules (can pass through walls); '
                              'safe: symmetric edge checks and legal-neighbour conflict replacement')
@@ -93,7 +95,7 @@ def build_parser():
 def run_config(args):
     import parameter
     return dict(reward_variant=args.reward, gamma=float(args.gamma), motion_rule=args.motion_rule,
-                individual_weight=float(args.individual_weight),
+                individual_weight=float(args.individual_weight), capability_blind=bool(args.capability_blind),
                 sensor_profile=parameter.SENSOR_PROFILE,
                 sensor_capabilities=[list(c) for c in parameter.EPISODE_SENSOR_CAPABILITIES],
                 utility_range=parameter.UTILITY_RANGE, team_frontier_normalizer=parameter.TEAM_FRONTIER_NORMALIZER,
@@ -105,7 +107,8 @@ def check_resume_config(checkpoint, config):
     saved = dict(reward_variant=checkpoint.get('reward_variant', 'legacy'),
                  gamma=float(checkpoint.get('gamma', 1.0)),
                  motion_rule=checkpoint.get('motion_rule', 'legacy'),
-                 individual_weight=float(checkpoint.get('individual_weight', 1.0)))
+                 individual_weight=float(checkpoint.get('individual_weight', 1.0)),
+                 capability_blind=bool(checkpoint.get('capability_blind', False)))
     if 'sensor_profile' in checkpoint:
         saved['sensor_profile'] = checkpoint['sensor_profile']
     mismatched = {key: (value, config[key]) for key, value in saved.items() if config[key] != value}
@@ -160,7 +163,8 @@ def _run(args, writer):
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    learner = None if args.evaluate else V1SACLearner(args.device, gamma=args.gamma)
+    learner = None if args.evaluate else V1SACLearner(args.device, gamma=args.gamma,
+                                                      capability_blind=args.capability_blind)
     actor = CapabilityConditionedActor().to(args.device) if args.evaluate else learner.actor
     checkpoint = None
     if args.checkpoint or args.resume:
@@ -174,6 +178,8 @@ def _run(args, writer):
             if checkpoint.get('format') != 'marvel-heterogeneous-v1':
                 raise ValueError('Evaluation requires V1 Actor weights')
             actor.load_state_dict(checkpoint['policy_model'])
+            config['capability_blind'] = actor.capability_blind  # the checkpoint decides for evaluation
+            print('V1_CONFIG_EVALUATED_ACTOR ' + json.dumps(dict(capability_blind=actor.capability_blind)), flush=True)
         else:
             learner.load_checkpoint(checkpoint)
     replay = JointReplayBuffer(seed=args.seed)
@@ -212,7 +218,8 @@ def _run(args, writer):
         payload = dict(learner.checkpoint(), next_episode=next_episode,
                        failed_episodes=failed_episodes, processed_episodes=processed_episodes,
                        reward_variant=args.reward, motion_rule=args.motion_rule,
-                       individual_weight=float(args.individual_weight), sensor_profile=config['sensor_profile'], run_config=config)
+                       individual_weight=float(args.individual_weight),
+                       capability_blind=bool(args.capability_blind), sensor_profile=config['sensor_profile'], run_config=config)
         atomic_checkpoint(payload, path.parent / 'latest.pth')
         if episode is not None:
             atomic_checkpoint(payload, path.parent / f'ep{episode}.pth')

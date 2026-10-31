@@ -1,3 +1,4 @@
+from dataclasses import replace
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -307,7 +308,41 @@ class PolarEncoder(nn.Module):
         return x.masked_fill(padded.unsqueeze(-1), 0)
 
 
-class CapabilityConditionedActor(nn.Module):
+class CapabilityMask:
+    """Optional ablation that hides EXPLICIT capability inputs from a V1 network.
+
+    The 'capability_mask' buffer is 1 normally and 0 for --capability-blind:
+    self capability and teammates' [FoV, range] columns are zeroed inside the
+    network, while observations, validation and the action set are unchanged
+    (candidate headings still come from each UAV's real sensor). The buffer is
+    in state_dict, so rollout copies receiving learner weights match the
+    learner; state dicts saved before it existed load with mask 1.
+    """
+
+    def _init_capability_mask(self):
+        self.register_buffer('capability_mask', torch.ones(1))
+
+    def set_capability_blind(self, blind):
+        with torch.no_grad():
+            self.capability_mask.fill_(0. if blind else 1.)
+        return self
+
+    @property
+    def capability_blind(self):
+        return bool(self.capability_mask.item() == 0)
+
+    def _mask_capability(self, self_capability, team_inputs):
+        mask = self.capability_mask
+        return self_capability * mask, torch.cat((team_inputs[..., :2] * mask, team_inputs[..., 2:]), dim=-1)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        key = prefix + 'capability_mask'
+        if key not in state_dict:
+            state_dict[key] = torch.ones(1)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+
+class CapabilityConditionedActor(CapabilityMask, nn.Module):
     """V1 shared Actor. Legacy PolicyNet/QNet and Replay remain separate."""
     uses_v1_actor_observation = True
 
@@ -326,6 +361,7 @@ class CapabilityConditionedActor(nn.Module):
         self.visited_headings_embedding = nn.Linear(NUM_ANGLES_BIN, EMBEDDING_DIM)
         self.action_mlp = nn.Sequential(nn.Linear(512, 256), nn.ReLU(), nn.Linear(256, 128))
         self.pointer = SingleHeadAttention(EMBEDDING_DIM)
+        self._init_capability_mask()
 
     def encode_graph(self, node_inputs, node_padding_mask, edge_mask, polar_frontiers):
         if node_inputs.shape[-1] != ACTOR_NODE_INPUT_DIM:
@@ -382,12 +418,13 @@ class CapabilityConditionedActor(nn.Module):
             raise ValueError('V1 Actor has no valid movement action; cannot apply ordinary softmax')
         node_features = self.encode_graph(node_inputs, node_padding_mask, edge_mask, polar_frontiers)
         state = self.decode_state(node_features, current_index, node_padding_mask)
+        self_capability, team_inputs = self._mask_capability(self_capability, team_inputs)
         capability = self.encode_capability(self_capability, team_inputs, team_padding_mask)
         return self.output_policy(state, node_features, current_edge, action_mask,
                                   headings_visited, neighbor_best_headings, capability)
 
 
-class CapabilityConditionedCritic(nn.Module):
+class CapabilityConditionedCritic(CapabilityMask, nn.Module):
     """One independent V1 GT Q network. Instantiate twice for Twin Q.
 
     forward consumes CriticObservation, including the Actor CandidateActionTable.
@@ -412,6 +449,7 @@ class CapabilityConditionedCritic(nn.Module):
         self.all_agent_embedding = nn.Linear(384, 128)
         self.agent_decoder = Decoder(embedding_dim=EMBEDDING_DIM, n_head=4, n_layer=1)
         self.q_values_layer = nn.Sequential(nn.Linear(384, 128), nn.ReLU(), nn.Linear(128, 1))
+        self._init_capability_mask()
 
     def encode_graph(self, observation):
         if observation.node_inputs.shape[-1] != CRITIC_NODE_INPUT_DIM:
@@ -497,9 +535,13 @@ class CapabilityConditionedCritic(nn.Module):
             raise ValueError('Agent ID mask must exclude exactly self from the four-agent team')
         nodes = self.encode_graph(observation)
         state = self.decode_state(nodes, observation)
-        capability = self.encode_capability(observation)
+        self_capability, team_inputs = self._mask_capability(observation.self_capability, observation.team_inputs)
+        masked = replace(observation, self_capability=self_capability, team_inputs=team_inputs,
+                         agent_capabilities=observation.agent_capabilities * self.capability_mask)
+        capability = self.encode_capability(masked)
+        # Candidate heading masks keep the true FoV: they describe the physical action.
         candidates = self.encode_candidates(nodes, capability, observation)
-        teammates = self.decode_agent_actions(state, nodes, observation)
+        teammates = self.decode_agent_actions(state, nodes, masked)
         values = self.q_values_layer(torch.cat((state.expand_as(candidates), candidates,
                                                teammates.expand_as(candidates)), dim=-1))
         return values.masked_fill(~valid.unsqueeze(-1), 0)

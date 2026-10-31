@@ -46,6 +46,14 @@ _SENSOR_PROFILES = {
                    sensor_range=10, initial_scan_range=10.0, frontier_range=20.0, utility_range=9.0),
     'compact': dict(capabilities=((180.0, 6.0), (180.0, 6.0), (45.0, 12.0), (45.0, 12.0)),
                     sensor_range=12, initial_scan_range=6.0, frontier_range=16.0, utility_range=5.4),
+    # Homogeneous comparison with the same total nominal sensing area as
+    # compact (4 x ~56.5 m^2): a single "generalist" between the two
+    # specialists. Graph, frontier, initial-scan and scan-share settings are
+    # identical to compact; only the sensors and the utility range differ,
+    # the latter by the same rule (0.9 x the team's shortest range).
+    'generalist': dict(capabilities=((90.0, 8.5),) * 4,
+                       sensor_range=12, initial_scan_range=6.0, frontier_range=16.0, utility_range=7.65,
+                       scan_share_capabilities=((180.0, 6.0), (180.0, 6.0), (45.0, 12.0), (45.0, 12.0))),
 }
 if SENSOR_PROFILE not in _SENSOR_PROFILES:
     raise ValueError(f'Unknown MARVEL_SENSOR_PROFILE {SENSOR_PROFILE!r}; use one of {sorted(_SENSOR_PROFILES)}')
@@ -77,8 +85,11 @@ NODE_RESOLUTION = 4.0  # meter
 FRONTIER_CELL_SIZE = 2 * CELL_SIZE
 # scan_share reward: newly observed cells / mean nominal sector area in cells,
 # the same divisor for every UAV (compact: 56.5 m^2 / 0.16 m^2 = 353.4).
-SCAN_SHARE_NORMALIZER = (sum(f / 360. * 3.141592653589793 * r * r for f, r in EPISODE_SENSOR_CAPABILITIES)
-                         / len(EPISODE_SENSOR_CAPABILITIES) / CELL_SIZE ** 2)
+# A profile may name the capabilities that define it, so that comparison
+# teams share one divisor (generalist uses compact's 353.4).
+_SCAN_SHARE_CAPABILITIES = _PROFILE.get('scan_share_capabilities', EPISODE_SENSOR_CAPABILITIES)
+SCAN_SHARE_NORMALIZER = (sum(f / 360. * 3.141592653589793 * r * r for f, r in _SCAN_SHARE_CAPABILITIES)
+                         / len(_SCAN_SHARE_CAPABILITIES) / CELL_SIZE ** 2)
 
 # map representation
 FREE = 255
